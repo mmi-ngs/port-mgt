@@ -11,7 +11,7 @@ from cycler import cycler
 from dateutil.relativedelta import relativedelta
 from tabulate import tabulate
 
-import port-mgt.utils as ut
+import utils as ut
 
 
 class PerfMetrics:

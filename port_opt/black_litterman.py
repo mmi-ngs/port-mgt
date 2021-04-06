@@ -8,8 +8,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from tabulate import tabulate
 
-import port_mgt.perf_metrics.perf_metrics as pm
-import port_mgt.utils.utils as ut
+import perf_metrics as pm
+import utils as ut
 
 
 # noinspection PyTypeChecker
