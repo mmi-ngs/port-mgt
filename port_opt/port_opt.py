@@ -103,12 +103,19 @@ class PortOptBase:
         """
         self.clean_wgt().to_csv(filename, header=False)
 
-    def _wgt_check(self, _sum=1):
+    def _wgt_check(self, wgt_sum=1):
         """
         Utility function to check whether final weights sum up to 1.
         * If leveraged or long-short, allows change of parameter to sum up to
           0 or else.
         """
+        if self.wgt is not None:
+            if round(self.wgt.sum(), 2) != wgt_sum:
+                raise ValueError('Weights do not sum up to {} (sum={})'.format(
+                    wgt_sum, self.wgt.sum()))
+        else:
+            raise AttributeError('Weights not yet computed')
+
 
 class PortOpt(PortOptBase):
     """
