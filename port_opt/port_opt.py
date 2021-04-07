@@ -103,6 +103,12 @@ class PortOptBase:
         """
         self.clean_wgt().to_csv(filename, header=False)
 
+    def _wgt_check(self, _sum=1):
+        """
+        Utility function to check whether final weights sum up to 1.
+        * If leveraged or long-short, allows change of parameter to sum up to
+          0 or else.
+        """
 
 class PortOpt(PortOptBase):
     """
@@ -131,7 +137,7 @@ class PortOpt(PortOptBase):
     """
 
     def __init__(self, n_assets, tickers=None, bounds=(0, 1),
-                 obj_str='max_sharpe'):
+                 obj_str='max_sharpe', print_res=True):
         """
 
         :param n_assets: [int] number of assets
@@ -142,6 +148,7 @@ class PortOpt(PortOptBase):
                         ['max_sharpe', 'min_cvar']
                         * If a list is passed, generate outcomes from different
                         objective functions.
+        :param print_res: [boolean] print results if True
         """
         super().__init__(n_assets, tickers)
 
@@ -163,3 +170,8 @@ class PortOpt(PortOptBase):
         self._lower_bounds = None
         self._upper_bounds = None
 
+        # Print
+        self.print_res = print_res
+
+    def add_constraint(self):
+        return
