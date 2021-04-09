@@ -1,15 +1,10 @@
 """
-The port_opt submodule houses the PortOpt class, which includes several embedded
-objective functions with flexibility in imposing constraints and bounds.
+The port_opt submodule houses the PortOpt parent class, which includes several
+embedded objective functions with flexibility in imposing constraints and
+bounds.
 
 The parent class PortOpt can be inherited to several use cases, e.g., SAA, DAA,
-within-sector optimizaton. The implemented objective functions include:
-* Max Sharpe
-* Max IR
-* Min Variance
-* Min CVaR
-* Max Calmar
-* Hierarchical Risk Parity (Marcos De Lopez, 2016)
+within-sector optimizaton. The child classes are also maintained here.
 
 The optimization algorithm is based on scipy.optimize.shgo, which is the
 go-to approach for relatively low dimensional settings. For SAA, DAA,
@@ -66,7 +61,7 @@ class PortOptBase:
         Utility function to set wgt attribute from user input
         * Check: len(input_wgt) == self.n_assets
 
-        :param input_wgt: [list] list of wgts
+        :param input_wgt: [list/array] list/array of weights
 
         """
         if len(input_wgt) != self.n_assets:
@@ -124,10 +119,6 @@ class PortOpt(PortOptBase):
     Additional features include constraints and built-in objective functions.
 
     ### Instance variables ###
-    obj_str: [str] or [list(str)] name of objective functions
-             e.g., obj_str = 'max_sharpe' / ['max_sharpe', 'min_cvar']
-             If a list is passed, generate outcomes from different objective
-             functions.
     bounds: [tuple] or [list(tuple)]: min and max weight of each asset or
             single pair if all identical, default (0, 1), need to be changed
             to (-1, 1) if allow shorting.
@@ -144,23 +135,23 @@ class PortOpt(PortOptBase):
     """
 
     def __init__(self, n_assets, tickers=None, bounds=(0, 1),
-                 obj_str='max_sharpe', print_res=True):
+                 obj_str='max_sharpe'):
         """
 
         :param n_assets: [int] number of assets
         :param tickers: [list(str)] list of strings of asset names
-        :param bounds: [np.array] np.array of asset weights
+        :param bounds: [np.array/tuple] np.array of asset weight bounds or a
+                        single tuple that fits for all assets
         :param obj_str: [str] or [list(str)] name of objective functions
                         e.g., obj_str = 'max_sharpe' OR
                         ['max_sharpe', 'min_cvar']
                         * If a list is passed, generate outcomes from different
                         objective functions.
-        :param print_res: [boolean] print results if True
         """
         super().__init__(n_assets, tickers)
 
         # Optimization variables
-        if isinstance(bounds, list):
+        if isinstance(bounds, list) and len(bounds) == self.n_assets:
             self.bounds = bounds
         elif isinstance(bounds, tuple):
             self.bounds = [bounds] * self.n_assets
@@ -168,17 +159,86 @@ class PortOpt(PortOptBase):
             self.bounds = [(None, None)] * self.n_assets
             raise Warning('Bounds are not defined.')
 
-        # Objective functions
-        if isinstance(obj_str, list):
-            n_obj_str = len(obj_str)
-
-        # Constraints
+        # Local variables
+        self._wgt = None
+        self._objective = None
+        self._objective_list = []
         self._constraints = []
         self._lower_bounds = None
         self._upper_bounds = None
 
-        # Print
-        self.print_res = print_res
+    def add_constraint(self, type_str, fun_str):
+        """
+        Add a constraint to scipy.shgo optimizer. The format of constraint is:
+        ({'type': 'eq', 'fun': lambda x: x.sum() - 1},
+         {'type': 'ineq', 'fun': lambda x: x - wgt_min},
+         {'type': 'ineq', 'fun': lambda x: wgt_max - x})
 
-    def add_constraint(self):
-        return
+        :param type_str: [str] 'eq' OR 'ineq';
+                     determine whether constraint is an equality constraint or
+                     inequality constraint.
+        :param fun_str: [str] a well-defined python function or lambda
+                        function written in string, will be decoded using
+                        eval() to
+        """
+        if not callable(eval(fun_str)):
+            raise TypeError(
+                "New constraint must be provided as a function")
+        self._constraints.append({'type': type_str, 'fun': eval(fun_str)})
+
+    def opt_run(self, obj_str, bounds=None, plot_ef=False, print_res=False):
+        """
+        Execute optimization based on defined objective functions and added
+        constraints.
+
+        :param obj_str: [str] or [list(str)]
+                Name[s] of pre-defined objective functions
+                e.g., obj_str = 'max_sharpe' / ['max_sharpe', 'min_cvar']
+                *If a list is passed, generate outcomes from different objective
+                functions.
+        :param bounds: [list/tuple] redefine the bounds for the optimization run
+                *If None, use instance variable self.bounds.
+        :param plot_ef: [boolean] plot efficient frontier if True
+        :param print_res: [boolean] print results if True
+        """
+        # Objective functions
+        if isinstance(obj_str, list):
+            self._objective_list = obj_str
+        else:
+            self._objective_list.append(obj_str)
+
+        # Define bounds
+        if bounds is not None:
+            if isinstance(bounds, list) and len(bounds) == self.n_assets:
+                self.bounds = bounds
+            elif isinstance(bounds, tuple):
+                self.bounds = [bounds] * self.n_assets
+            else:
+                raise TypeError('Bounds are not list or tuple, or the length '
+                                'of list does not match the n_assets.')
+
+        # Loop through objective functions for optimization
+
+        # Might Need a function to call those objective functions
+
+        # Need a efficient frontier class to plot the results.
+        return abc
+
+    def opt_perf(self, initial_wgt=None, plot_ef=False):
+        """
+        Conduct performance comparison between initial weight and optimized
+        weight (or use set_weight() method to compare an initial weight and a
+        user input weight).
+
+        :param initial_wgt: [list/array] list or array of the current weights
+                            for performance comparison; no comparison if not
+                            provide, pure optimization performance
+        :param plot_ef: [boolean] plot efficient frontier if True
+        :return: df_perf: [pd.DataFrame] DataFrame of optimized weights and
+                          optimized performance
+        """
+        if initial_wgt is not None:
+            if len(initial_wgt) != self.n_assets:
+                raise ValueError('Length of list not equal to number of assets')
+
+        return abc
