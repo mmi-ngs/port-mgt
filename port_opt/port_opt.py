@@ -4,7 +4,7 @@ embedded objective functions with flexibility in imposing constraints and
 bounds.
 
 The parent class PortOpt can be inherited to several use cases, e.g., SAA, DAA,
-within-sector optimizaton. The child classes are also maintained here.
+within-sector optimization. The child classes are also maintained here.
 
 The optimization algorithm is based on scipy.optimize.shgo, which is the
 go-to approach for relatively low dimensional settings. For SAA, DAA,
@@ -12,10 +12,12 @@ and within-sector optimization, it seems to be the best performer.
 (ref: https://www.microprediction.com/blog/optimize)
 """
 
-import collections
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import shgo
+
+import port_opt.objective_functions as obj
 
 
 class PortOptBase:
@@ -134,19 +136,13 @@ class PortOpt(PortOptBase):
 
     """
 
-    def __init__(self, n_assets, tickers=None, bounds=(0, 1),
-                 obj_str='max_sharpe'):
+    def __init__(self, n_assets, tickers=None, bounds=(0, 1)):
         """
 
         :param n_assets: [int] number of assets
         :param tickers: [list(str)] list of strings of asset names
         :param bounds: [np.array/tuple] np.array of asset weight bounds or a
                         single tuple that fits for all assets
-        :param obj_str: [str] or [list(str)] name of objective functions
-                        e.g., obj_str = 'max_sharpe' OR
-                        ['max_sharpe', 'min_cvar']
-                        * If a list is passed, generate outcomes from different
-                        objective functions.
         """
         super().__init__(n_assets, tickers)
 
@@ -163,9 +159,11 @@ class PortOpt(PortOptBase):
         self._wgt = None
         self._objective = None
         self._objective_list = []
+        self._args = {}
         self._constraints = []
         self._lower_bounds = None
         self._upper_bounds = None
+        self._opt_res = {}
 
     def add_constraint(self, type_str, fun_str):
         """
@@ -186,7 +184,7 @@ class PortOpt(PortOptBase):
                 "New constraint must be provided as a function")
         self._constraints.append({'type': type_str, 'fun': eval(fun_str)})
 
-    def opt_run(self, obj_str, bounds=None, plot_ef=False, print_res=False):
+    def opt_run(self, obj_str, args, bounds=None, print_res=False):
         """
         Execute optimization based on defined objective functions and added
         constraints.
@@ -196,18 +194,41 @@ class PortOpt(PortOptBase):
                 e.g., obj_str = 'max_sharpe' / ['max_sharpe', 'min_cvar']
                 *If a list is passed, generate outcomes from different objective
                 functions.
+        :param args: [tuple] or [dict(tuple)]
+                Arguments passed on for scipy.optimize.shgo optimizers.
+                e.g., For 'max_sharpe', args = (ret, cov, rf=0.0025,
+                negative=True).
+                *If a dictionary of tuples is passed, the keys should
+                match the objective functions respectively.
+                e.g., args = {
+                'max_sharpe': (ret, cov, rf=0,0025, negative=True),
+                'min_var': (cov)}
         :param bounds: [list/tuple] redefine the bounds for the optimization run
                 *If None, use instance variable self.bounds.
-        :param plot_ef: [boolean] plot efficient frontier if True
         :param print_res: [boolean] print results if True
         """
         # Objective functions
         if isinstance(obj_str, list):
+            if not isinstance(args, dict):
+                raise TypeError('When obj_str is a list, args should be a '
+                                'dictionary matching the objective functions.')
             self._objective_list = obj_str
-        else:
+        elif isinstance(obj_str, str):
             self._objective_list.append(obj_str)
+        else:
+            raise TypeError('obj_str is not a list or string.')
 
-        # Define bounds
+        # Args
+        if isinstance(args, tuple):
+            self._args[obj_str] = args
+        elif isinstance(args, dict):
+            if not [*args.keys()] == self._objective_list:
+                raise KeyError('The keys of dictionary args should be the '
+                               'same as the obj_str list.')
+            else:
+                self._args = args
+
+        # Bounds
         if bounds is not None:
             if isinstance(bounds, list) and len(bounds) == self.n_assets:
                 self.bounds = bounds
@@ -218,11 +239,21 @@ class PortOpt(PortOptBase):
                                 'of list does not match the n_assets.')
 
         # Loop through objective functions for optimization
+        for i in self._objective_list:
+            self._objective = obj.call_obj_functions(i)
+            res_i = shgo(self._objective, bounds=self.bounds,
+                         args=self._args[i], constraints=self._constraints,
+                         options={'maxiter': 10000})
+            self._wgt_check(res_i.x)
+            self._opt_res[i] = res_i
 
-        # Might Need a function to call those objective functions
+        # Print optimized weights
+        if print_res:
+            for a, b in self._opt_res:
+                print(a)
+                print(b.x)
 
-        # Need a efficient frontier class to plot the results.
-        return abc
+        return self._opt_res
 
     def opt_perf(self, initial_wgt=None, plot_ef=False):
         """
@@ -241,4 +272,4 @@ class PortOpt(PortOptBase):
             if len(initial_wgt) != self.n_assets:
                 raise ValueError('Length of list not equal to number of assets')
 
-        return abc
+        return
