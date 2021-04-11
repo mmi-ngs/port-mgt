@@ -15,7 +15,7 @@ and within-sector optimization, it seems to be the best performer.
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import shgo
+from scipy.optimize import shgo, minimize
 
 import port_opt.objective_functions as obj
 
@@ -28,59 +28,65 @@ class PortOptBase:
     ### Instance variables ###
     n_assets: [int] number of assets
     tickers: [list(str)] list of strings of asset names
+    long_short: [boolean] market-neutral if True, weight sum to 0
+
     wgt: [np.array] np.array of asset weights
+    wgt_dict: [dict] dictionary of all optimized or input clean weights
 
     ### Public Methods ###
-    set_wgt(): set weights from user input
-    clean_wgt(): rounds up to 2 decimals
+    add_clean_wgt(): rounds up to 2 decimals, add as a series to the wgt_dict
     export_wgt(): save weights to csv file
     """
 
-    def __init__(self, n_assets, tickers=None):
+    def __init__(self, n_assets, tickers=None, long_short=False):
         """
         :param n_assets: [int] number of assets
         :param tickers: [list(str)] list of strings of asset names
+        :param long_short: [boolean] market-neutral if True, weight sum to 0
         """
         self.n_assets = n_assets
         if tickers is None:
             self.tickers = list(range(n_assets))
-        self._rf = None
+        elif len(tickers) != n_assets:
+            raise AttributeError('tickers length is not the same as n_assets.')
+        else:
+            self.tickers = tickers
+
+        if long_short:
+            self._wgt_sum = 0
+        else:
+            self._wgt_sum = 1
+
         # Outputs
         self.wgt = None
+        self.wgt_dict = {}
 
-    def _make_wgt_series(self, wgt=None):
+    def add_clean_wgt(self, input_wgt=None, wgt_name=None, cutoff=1e-4,
+                      decimal=2):
         """
-        Utility function to make output wgt pd.Series from wgt np.array.
-        Use self.tickers and self.wgt if no wgt argument passed.
-        """
-        if wgt is None:
-            wgt = self.wgt
+        Helper function to check the weights sum to specified value (1/0),
+        clean the raw weights, setting any weights whose absolute values are
+        below the cutoff to zero, and round the rest. Then check the sum
+        again before making it a pd.Series output.
 
-        return pd.Series(wgt, index=self.tickers)
-
-    def set_wgt(self, input_wgt):
-        """
-        Utility function to set wgt attribute from user input
-        * Check: len(input_wgt) == self.n_assets
-
-        :param input_wgt: [list/array] list/array of weights
-
-        """
-        if len(input_wgt) != self.n_assets:
-            raise ValueError('Length of list not equal to number of assets')
-        self.wgt = np.array(input_wgt)
-
-    def clean_wgt(self, cutoff=1e-4, decimal=4):
-        """
-        Helper function to clean the raw weights, setting any weights whose
-        absolute values are below the cutoff to zero, and round the rest.
-
+        :param input_wgt: [list/array] the input weights to be made the
+                          default weight and added to the weight dictionary
+        :param wgt_name: [str] the name of the weight, usually defined as the
+                         objective function name, e.g., 'max_sharpe'.
         :param cutoff: [float] the lower bound, default to 1e-4
         :param decimal: [int] number of decimal places to round weights,
-                      default 4
+                      default 2
                       * Check: positive integer (int & >1)
-        :return: wgt [dict] from ._make_output_wgt() method
+        :return: wgt [pd.Series] from ._make_wgt_series() method
         """
+        # Check if there is new input_wgt
+        if input_wgt is not None:
+            self._set_wgt(input_wgt)
+
+        # Check sum
+        self._wgt_check()
+
+        # Clean
         if self.wgt is None:
             raise AttributeError('Weights not yet computed')
         clean_wgt = self.wgt.copy()
@@ -90,28 +96,78 @@ class PortOptBase:
         else:
             clean_wgt = np.round(clean_wgt, decimal)
 
-        return self._make_wgt_series(clean_wgt)
+        # Check again
+        self._wgt_check(clean_wgt)
 
-    def export_wgt(self, filename="wgt.csv"):
+        # Add clean_wgt to self.wgt_dict
+        if wgt_name is None:
+            wgt_name = 'Wgt_{}'.format(len(self.wgt_dict))
+
+        self.wgt_dict[wgt_name] = \
+            self._make_wgt_series(clean_wgt, wgt_name=wgt_name)
+
+    def export_wgt(self, save_csv=False, filename="wgt.csv"):
         """
-        Utility function to save weights to a csv file.
+        Utility function to export weights to a DataFrame and save weights to a
+        csv file.
 
+        :param save_csv: [boolean] save to a csv file if True.
         :param filename: [str] name of file. Should be csv.
         """
-        self.clean_wgt().to_csv(filename, header=False)
+        if self.wgt_dict is None:
+            raise Exception('Empty dictionary of weight outputs. ')
+        df_output = pd.DataFrame.from_dict(self.wgt_dict)
+        if save_csv:
+            df_output.to_csv(filename)
+        return df_output
 
-    def _wgt_check(self, wgt_sum=1):
+    def _set_wgt(self, wgt):
+        """
+        Utility function to set the self.wgt to the input wgt.
+
+        :param wgt: [list/array] the input weight
+        """
+        if not (isinstance(wgt, list) or (isinstance(wgt, np.ndarray))):
+            raise ValueError('Input wgt is not a list or np.ndarray.')
+        else:
+            if len(wgt) != self.n_assets:
+                raise AttributeError('Input wgt length is not matching '
+                                     'n_assets.')
+            else:
+                self._wgt_check(wgt)
+                self.wgt = wgt
+
+    def _wgt_check(self, wgt=None):
         """
         Utility function to check whether final weights sum up to 1.
         * If leveraged or long-short, allows change of parameter to sum up to
           0 or else.
         """
-        if self.wgt is not None:
-            if round(self.wgt.sum(), 2) != wgt_sum:
-                raise ValueError('Weights do not sum up to {} (sum={})'.format(
-                    wgt_sum, self.wgt.sum()))
+        if wgt is not None:
+            if round(wgt.sum(), 2) != self._wgt_sum:
+                raise ValueError(
+                    'New weights do not sum up to {} (sum={})'.format(
+                        self._wgt_sum, wgt.sum()))
+            else:
+                pass
         else:
-            raise AttributeError('Weights not yet computed')
+            if self.wgt is not None:
+                if round(self.wgt.sum(), 2) != self._wgt_sum:
+                    raise ValueError(
+                        'Weights do not sum up to {} (sum={})'.format(
+                            self._wgt_sum, self.wgt.sum()))
+            else:
+                raise AttributeError('Weights not yet computed')
+
+    def _make_wgt_series(self, wgt=None, wgt_name=None):
+        """
+        Utility function to make output wgt pd.Series from wgt np.array.
+        Use self.tickers and self.wgt if no wgt argument passed.
+        """
+        if wgt is None:
+            wgt = self.wgt
+
+        return pd.Series(wgt, index=self.tickers, name=wgt_name)
 
 
 class PortOpt(PortOptBase):
@@ -121,30 +177,33 @@ class PortOpt(PortOptBase):
     Additional features include constraints and built-in objective functions.
 
     ### Instance variables ###
+    n_assets: [int] number of assets
+    tickers: [list(str)] list of strings of asset names
+    long_short: [boolean] market-neutral if True, weight sum to 0
     bounds: [tuple] or [list(tuple)]: min and max weight of each asset or
             single pair if all identical, default (0, 1), need to be changed
             to (-1, 1) if allow shorting.
-    n_assets: [int] number of assets
-    tickers: [list(str)] list of strings of asset names
+
     wgt: [np.array] np.array of asset weights
+    wgt_dict: [dict] dictionary of all optimized or input clean weights
 
     ### Public Methods ###
     add_constraint(): add a constraint for optimization
-    set_wgt(): set weights from user input
-    clean_wgt(): rounds up to 2 decimals
+    add_clean_wgt(): rounds up to 2 decimals, add as a series to the wgt_dict
     export_wgt(): save weights to csv file
 
     """
 
-    def __init__(self, n_assets, tickers=None, bounds=(0, 1)):
+    def __init__(self, n_assets, tickers=None, long_short=False, bounds=(0, 1)):
         """
 
         :param n_assets: [int] number of assets
         :param tickers: [list(str)] list of strings of asset names
+        :param long_short: [boolean] market-neutral if True, weight sum to 0
         :param bounds: [np.array/tuple] np.array of asset weight bounds or a
                         single tuple that fits for all assets
         """
-        super().__init__(n_assets, tickers)
+        super().__init__(n_assets, tickers, long_short)
 
         # Optimization variables
         if isinstance(bounds, list) and len(bounds) == self.n_assets:
@@ -157,12 +216,12 @@ class PortOpt(PortOptBase):
 
         # Local variables
         self._wgt = None
+        self._wgt0 = np.array([1/self.n_assets] * self.n_assets)
         self._objective = None
         self._objective_list = []
-        self._args = {}
+        self._args = None
+        self._args_dict = {}
         self._constraints = []
-        self._lower_bounds = None
-        self._upper_bounds = None
         self._opt_res = {}
 
     def add_constraint(self, type_str, fun_str):
@@ -220,13 +279,13 @@ class PortOpt(PortOptBase):
 
         # Args
         if isinstance(args, tuple):
-            self._args[obj_str] = args
+            self._args_dict[obj_str] = args
         elif isinstance(args, dict):
             if not [*args.keys()] == self._objective_list:
                 raise KeyError('The keys of dictionary args should be the '
                                'same as the obj_str list.')
             else:
-                self._args = args
+                self._args_dict = args
 
         # Bounds
         if bounds is not None:
@@ -241,17 +300,20 @@ class PortOpt(PortOptBase):
         # Loop through objective functions for optimization
         for i in self._objective_list:
             self._objective = obj.call_obj_functions(i)
-            res_i = shgo(self._objective, bounds=self.bounds,
-                         args=self._args[i], constraints=self._constraints,
-                         options={'maxiter': 10000})
-            self._wgt_check(res_i.x)
+            self._args = self._args_dict[i]
+
+            # Run optimization
+            res_i = self.opt_selector()
+
+            # Set weight and standard weight check and clean
+            self.wgt = res_i.x
+            self.add_clean_wgt(wgt_name=i)
             self._opt_res[i] = res_i
 
         # Print optimized weights
         if print_res:
-            for a, b in self._opt_res:
-                print(a)
-                print(b.x)
+            for a, b in self.wgt_dict.items():
+                print(b)
 
         return self._opt_res
 
@@ -273,3 +335,41 @@ class PortOpt(PortOptBase):
                 raise ValueError('Length of list not equal to number of assets')
 
         return
+
+    def opt_selector(self, set_opt=None):
+        """
+        Helper function to select the correct optimization function based on
+        the dimension of the problem.
+        :param set_opt: [str] name of the optimization method.
+                        e.g. 'shgo', 'SLQLP'.
+
+        If set_opt is None:
+            Automatically set it based on the condition below:
+            If self.n_assets <= 10, use shgo. Else: use SLSQP.
+        Else:
+            use set_opt. (UD)
+        :return:
+        """
+        opt_avail = ['shgo', 'Powell', 'SLSQP']
+        if set_opt is None:
+            if self.n_assets <= 10:
+                res = shgo(self._objective,
+                           bounds=self.bounds,
+                           args=self._args,
+                           constraints=self._constraints,
+                           options={'maxiter': 10000})
+            else:
+                res = minimize(self._objective,
+                               x0=self._wgt0,
+                               bounds=self.bounds, args=self._args,
+                               method='SLSQP',
+                               constraints=self._constraints,
+                               options={'maxiter': 10000, 'disp': True})
+        else:
+            if set_opt not in opt_avail:
+                raise ValueError('Undefined optimization method.')
+            else:
+                res = None
+                print('Setting optimizer is still under development.')
+
+        return res
