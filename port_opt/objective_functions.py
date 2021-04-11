@@ -87,7 +87,7 @@ def sharpe_ratio(wgt, ret, cov, rf=0.0025, negative=True):
     return sharpe
 
 
-def quadratic_utility(wgt, ret, cov, risk_aversion, negative=True):
+def quadratic_utility(wgt, ret, cov, risk_aversion, rf=0.0025, negative=True):
     """
     Quadratic utility function,
     i.e :math:`w.T @ r - 0.5 * A * w.T @ Sigma @ w`.
@@ -97,24 +97,26 @@ def quadratic_utility(wgt, ret, cov, risk_aversion, negative=True):
     :param cov: [np.ndarray] (NxN) covariance matrix
     :param risk_aversion: [float] risk aversion coefficient. Higher
                           risk_aversion, lower portfolio risk.
+    :param rf: [float] static risk-free rate
     :param negative: [boolean] set True if return negative value
     :return: quad_utility: [float] value of the objective function
     """
     if not (isinstance(wgt, np.ndarray) & isinstance(ret, np.ndarray) &
             isinstance(cov, np.ndarray) &
             (isinstance(risk_aversion, float) or isinstance(risk_aversion, int))
-            & isinstance(negative, bool)):
+            & isinstance(rf, float) & isinstance(negative, bool)):
         raise TypeError(
-            'At least one input out of [wgt, ret, cov, risk_aversion, negative]'
+            'At least one input out of '
+            '[wgt, ret, cov, risk_aversion, rf, negative]'
             ' is not matching '
-            '[np.ndarray, np.ndarray, np.ndarray, float/int, bool].')
+            '[np.ndarray, np.ndarray, np.ndarray, float/int, float, bool].')
 
     if not ((wgt.ndim == 1) & (ret.ndim == 1) & (cov.ndim == 2)):
         raise AttributeError('Dimensions of [wgt, ret, cov] are not [1, 1, 2].')
 
     sign = -1 if negative else 1
     quad_utility = \
-        sign * (wgt.T @ ret - 0.5 * risk_aversion * wgt.T @ cov @ wgt)
+        sign * (wgt.T @ ret - rf - 0.5 * risk_aversion * wgt.T @ cov @ wgt)
     return quad_utility
 
 

@@ -15,7 +15,7 @@ and within-sector optimization, it seems to be the best performer.
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import shgo, minimize
+from scipy.optimize import shgo, minimize, dual_annealing
 
 import port_opt.objective_functions as obj
 
@@ -96,7 +96,13 @@ class PortOptBase:
         else:
             clean_wgt = np.round(clean_wgt, decimal)
 
-        # Check again
+        # If clean_wgt doesn't sum up to specified sum, change the max wgt by
+        # its difference and check again.
+        if clean_wgt.sum() != self._wgt_sum:
+            _wgt_ex = clean_wgt.sum() - self._wgt_sum
+            if abs(_wgt_ex) <= 0.02:
+                clean_wgt[clean_wgt == max(clean_wgt)] -= _wgt_ex
+
         self._wgt_check(clean_wgt)
 
         # Add clean_wgt to self.wgt_dict
@@ -365,11 +371,15 @@ class PortOpt(PortOptBase):
                                method='SLSQP',
                                constraints=self._constraints,
                                options={'maxiter': 10000, 'disp': True})
+                # res = dual_annealing(self._objective,
+                #                      x0=self._wgt0,
+                #                      bounds=self.bounds, args=self._args)
         else:
             if set_opt not in opt_avail:
                 raise ValueError('Undefined optimization method.')
             else:
                 res = None
-                print('Setting optimizer is still under development.')
+                print('Manually setting optimizer is still under development.')
 
         return res
+
