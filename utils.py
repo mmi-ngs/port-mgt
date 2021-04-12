@@ -258,3 +258,18 @@ def mem_usage_check(df):
     Check the memory usage of a pd.DataFrame
     """
     print('dense : {:0.2f} bytes'.format(df.memory_usage().sum() / 1e3))
+
+
+def nested_dict_to_df(input_dict, orient='columns'):
+    """
+    Convert a nested dictionary to pd.DataFrame.
+
+    :param input_dict: [dict] a nested dictionary
+    :param orient: [str] 'index'/'column', define the orientation of the
+                   returned DataFrame
+    :return: df: [pd.DataFrame] a multi-index DataFrame
+    """
+    df = pd.DataFrame.from_dict(
+        {(i, j): input_dict[i][j] for i in input_dict.keys()
+         for j in input_dict[i].keys()}, orient=orient)
+    return df
