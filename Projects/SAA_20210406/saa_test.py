@@ -44,6 +44,17 @@ wgt_multi_options = saa_opt.export_wgt(save_csv=True,
                                        filename='saa_test_run_result.csv')
 
 
+
+
+
+
+
+
+
+
+
+
+
 # Test one option and one objective function
 saa_opt = SAAOpt(map_saa, cons_saa, option_i, n_assets=N,
                  tickers=sub_sectors, bounds=bounds)
