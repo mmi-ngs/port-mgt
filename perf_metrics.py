@@ -19,7 +19,7 @@ class PerfMetrics:
     Calculate a variety of performance metrics for a given portfolio series
     """
 
-    def __init__(self, mgr, bmk, rf, freq, period):
+    def __init__(self, mgr, bmk, rf, freq, period, trading_day=True):
         """
         ---Inputs---
         :param mgr: Series, (T x ), single asset/mgr time series return
@@ -29,6 +29,8 @@ class PerfMetrics:
         :param period: int or tuple,
                         1) int, recent n years
                         2) tuple, (start_date, end_date)
+        :param trading_day: boolean, True or False;
+                see ut.freq_adj() parameter description.
         """
         self.metrics_list = ['Annual Return', 'Annual Vol', 'Alpha',
                              "Jenson's Alpha",
@@ -40,14 +42,14 @@ class PerfMetrics:
 
         # Time period adjustments
         df_raw = pd.concat([mgr, bmk, rf], axis=1)
-        df_raw_adj = ut.period_adj(df_raw, period, freq)
+        df_raw_adj = ut.period_adj(df_raw, period, freq, trading_day)
         _, df_new = ut.first_common_date(df_raw_adj)
 
         self.mgr = df_new.iloc[:, 0]
         self.bmk = df_new.iloc[:, 1]
         self.rf = df_new.iloc[:, 2]
         self.freq = freq
-        self.Q = ut.freq_adj(freq)
+        self.Q = ut.freq_adj(freq, trading_day)
         self.yrs = np.round(self.mgr.size / self.Q, 2)
 
         if mgr.shape != bmk.shape or mgr.shape != rf.shape:
@@ -187,6 +189,8 @@ class PerfMetrics:
             return var_xi
         elif self.freq == 'daily':
             return var_xi * 21
+        elif self.freq == 'quarterly':
+            return var_xi / 4
         else:
             return np.nan
 
@@ -199,6 +203,8 @@ class PerfMetrics:
             return cvar_mgr
         elif self.freq == 'daily':
             return cvar_mgr * 21
+        elif self.freq == 'quarterly':
+            return cvar_mgr / 4
         else:
             return np.nan
 
@@ -236,7 +242,7 @@ class PerfMetrics:
 
 
 class PortPerfMetrics(PerfMetrics):
-    def __init__(self, wgt, df_mgr, bmk, rf, freq, period):
+    def __init__(self, wgt, df_mgr, bmk, rf, freq, trading_day, period):
         """
         Calculate the portfolio performance metrics.
         ---Inputs---
@@ -245,13 +251,15 @@ class PortPerfMetrics(PerfMetrics):
         :param bmk: Series, (T x ), bmk time series return
         :param rf: Series, (Tx ), rf time series return
         :param freq: str, 'monthly' or 'daily'
+        :param trading_day: boolean, True or False;
+                see ut.freq_adj() parameter description.
         :param period: int or tuple,
                         1) int, recent n years
                         2) tuple, (start_date, end_date)
         """
         # Calculate portfolio time series return
         port = pd.Series(df_mgr @ wgt, name='Port Ret')
-        super().__init__(port, bmk, rf, freq, period)
+        super().__init__(port, bmk, rf, freq, trading_day, period)
         self.wgt = wgt
         self.df_mgr = df_mgr
         self.port = port
@@ -263,21 +271,21 @@ class PortPerfMetrics(PerfMetrics):
         :return: infor_ratio_exp, float
         """
         return (self.wgt.T @ ret_exp - self.bmk.mean() * self.Q) / \
-               self.tracking_error()
+                self.tracking_error()
 
 
-
-def sep_perf_metrics(df_mgr, bmk, rf, freq, period):
+def sep_perf_metrics(df_mgr, bmk, rf, freq, trading_day, period):
     output_list = []
     for i in range(df_mgr.columns.size):
         output_list.append(
             PerfMetrics(df_mgr.iloc[:, i], bmk, rf,
-                        freq, period).metrics())
+                        freq, trading_day, period).metrics())
     df_res = pd.concat(output_list, axis=1).round(2)
     return df_res
 
 
-def df_perf_metrics(df, bmk_str, rf_str, freq='monthly', period=999,
+def df_perf_metrics(df, bmk_str, rf_str, freq='monthly',
+                    period=999, trading_day=True,
                     cols_incl=7,
                     monetary_regime_str='NA'):
     """
@@ -287,6 +295,7 @@ def df_perf_metrics(df, bmk_str, rf_str, freq='monthly', period=999,
     :param rf_str: str, the column name of rf
     :param freq: str, 'monthly' or 'daily'
     :param period: int/tuple, recent n years / (start_date, end_date)
+    :param trading_day: boolean, True or False, True 252 days, False 365 days
     :param cols_incl: int, number of columns included in the calculation
     :param monetary_regime_str: str, 'NA'/'Easing'/'Tightening'/'Flat'
            *Note: requires an additional column in df to use this
@@ -307,7 +316,8 @@ def df_perf_metrics(df, bmk_str, rf_str, freq='monthly', period=999,
         col = df.loc[:, i]
         rf = df[rf_str]
         bmk = df[bmk_str]
-        output_list.append(PerfMetrics(col, bmk, rf, freq, period).metrics())
+        output_list.append(PerfMetrics(col, bmk, rf, freq,
+                                       period, trading_day).metrics())
     df_res = pd.concat(output_list, axis=1).round(2)
     return df_res
 
@@ -398,23 +408,23 @@ def perf_scatter(res_str, legend_str, color_str, axs_str, col_str, marker_str,
     return
 
 
-def port_ret(wgt, df_ret, freq):
+def port_ret(wgt, df_ret, freq, trading_day=True):
     """
     Calculate the portfolio return based on weight and return, where freq is
     for data frequency adjustments.
     *Note: if ret is annualized expected return (e.g. ret_bl), freq = 'yearly'
     """
-    q_factor = ut.freq_adj(freq)
+    q_factor = ut.freq_adj(freq, trading_day)
     return wgt.T @ df_ret * q_factor
 
 
-def port_vol(wgt, cov_hist, freq):
+def port_vol(wgt, cov_hist, freq, trading_day=True):
     """
     Calculate the portfolio volatility based on weight and covariance
     matrix, where freq is for data frequency adjustments.
     e.g. monthly: *np.sqrt(12)
     """
-    q_factor = ut.freq_adj(freq)
+    q_factor = ut.freq_adj(freq, trading_day)
     return np.sqrt(wgt.T @ cov_hist @ wgt) * np.sqrt(q_factor)
 
 
@@ -423,16 +433,17 @@ def holding_period_ret(ret_series):
     return np.prod(ret_series + 1) - 1
 
 
-def rolling_ret(ret_series, period, freq):
-    q_factor = ut.freq_adj(freq)
+def rolling_ret(ret_series, period, freq, trading_day=True):
+    q_factor = ut.freq_adj(freq, trading_day)
     T = int(period * q_factor)
     return (ret_series.rolling(T).apply(
         holding_period_ret, raw=False) + 1) ** (1 / period) - 1
 
 
-def rolling_alpha(ret_series, bmk, period, freq):
-    return rolling_ret(ret_series, period, freq) - rolling_ret(bmk, period,
-                                                               freq)
+def rolling_alpha(ret_series, bmk, period, freq, trading_day=True):
+    return rolling_ret(ret_series, period, freq, trading_day) - \
+           rolling_ret(bmk, period, freq, trading_day)
+
 
 def cum_ret(ret_series, freq, x=1):
     """Cumulative Return (Growth of X)"""
@@ -662,7 +673,8 @@ def alpha_corr_heatmap(Source_EQ, Source_Code, sub_sector_str_list, yr=999,
     return corr_matrix
 
 
-def corr_heatmap(df, bmk=None, period=999, freq='monthly', title=None):
+def corr_heatmap(df, bmk=None, period=999, freq='monthly', title=None,
+                 trading_day=True):
     """
     :param df: DataFrame of Returns
     :param bmk: Series of benchmark returns -> If not None, calculate alpha
@@ -673,7 +685,7 @@ def corr_heatmap(df, bmk=None, period=999, freq='monthly', title=None):
     if bmk is not None:
         df = df.subtract(bmk, axis=0)
 
-    df = ut.period_adj(df, period, freq)
+    df = ut.period_adj(df, period, freq, trading_day)
     df = ut.first_common_date(df)[1]
     dt_str = df.index[0].strftime('%Y-%m') + ' - ' + df.index[-1].strftime(
         '%Y-%m')
@@ -738,8 +750,8 @@ def pairplot(df, tail_classify=False, title='Pair Plot', **kwargs):
     return
 
 
-def cum_ret_chart(df, period=999, freq='monthly', x=1):
-    df = ut.period_adj(df, period, freq)
+def cum_ret_chart(df, period=999, freq='monthly', x=1, trading_day=True):
+    df = ut.period_adj(df, period, freq, trading_day)
     df_cum = df_cum_ret(df, freq, x)
     dt_str = df_cum.index[0].strftime('%Y-%m') + ' - ' + df_cum.index[
         -1].strftime('%Y-%m')

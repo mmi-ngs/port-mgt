@@ -31,18 +31,24 @@ def first_common_date(df):
     return dt, df_new
 
 
-def freq_adj(freq):
+def freq_adj(freq, trading_day=True):
     """
     Define the frequency factor used to calculate annualized return, vol, cov.
     Inputs:
     freq: str, 'monthly' or 'daily'
+    trading_day: boolean, True or False, used for 'daily' freq only.
+        if True: q_factor = 252;
+        if False: q_factor = 365.
     Outputs:
     q: int, 252 or 12
     """
     if freq == 'monthly':
         q_factor = 12
     elif freq == 'daily':
-        q_factor = 252
+        if trading_day:
+            q_factor = 252
+        else:
+            q_factor = 365
     elif freq == 'yearly':
         q_factor = 1
     elif freq == 'quarterly':
@@ -52,7 +58,7 @@ def freq_adj(freq):
     return q_factor
 
 
-def period_adj(df, period, freq):
+def period_adj(df, period, freq, trading_day=True):
     """
     Make time period adjustments
     ---Inputs---
@@ -61,10 +67,13 @@ def period_adj(df, period, freq):
         1) int: the most recent x years
         2) tuple: (start_date, end_date)
     :param freq: str, 'monthly'/'daily'/'yearly'
+    :param trading_day: boolean, True or False, used for 'daily' freq only.
+        if True: q_factor = 252;
+        if False: q_factor = 365.
     ---Outputs---
     :return: df_adj
     """
-    Q = freq_adj(freq)
+    Q = freq_adj(freq, trading_day)
     if type(df) is pd.DataFrame:
         if type(period) is int:
             df_adj = df.iloc[int(-period * Q):, :]
