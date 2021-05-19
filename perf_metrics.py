@@ -37,7 +37,8 @@ class PerfMetrics:
                              'Beta',
                              'Upside Capture', 'Downside Capture',
                              'Skewness', 'Kurtosis', 'Max Drawdown',
-                             'VaR', 'CVaR', 'Sharpe Ratio', 'Infor Ratio',
+                             'VaR', 'CVaR', 'Sharpe Ratio',
+                             'Infor Ratio', 'Calmar Ratio',
                              'Tracking Error', 'Yrs', 'Bmk']
 
         # Time period adjustments
@@ -168,7 +169,7 @@ class PerfMetrics:
         """
         return skew(self.mgr)
 
-    def kurtosis(self):
+    def kurt(self):
         """
         Fisher Kurtosis: 0 for normal distribution
         """
@@ -218,6 +219,9 @@ class PerfMetrics:
     def infor_ratio(self):
         return self.alpha() / self.tracking_error()
 
+    def calmar_ratio(self):
+        return self.ann_ret() / abs(self.max_drawdown())
+
     def metrics(self):
         data = pd.Series(np.nan, index=self.metrics_list, name=self.mgr.name)
 
@@ -229,15 +233,16 @@ class PerfMetrics:
         data.iloc[5] = round(self.up_down_capture()[0], 4)
         data.iloc[6] = round(self.up_down_capture()[1], 4)
         data.iloc[7] = round(self.skewness(), 4)
-        data.iloc[8] = round(self.kurtosis(), 4)
+        data.iloc[8] = round(self.kurt(), 4)
         data.iloc[9] = round(self.max_drawdown(), 4)
         data.iloc[10] = round(self.var(), 4)
         data.iloc[11] = round(self.cvar(), 4)
         data.iloc[12] = round(self.sharpe_ratio(), 4)
         data.iloc[13] = round(self.infor_ratio(), 4)
-        data.iloc[14] = round(self.tracking_error(), 4)
-        data.iloc[15] = round(self.yrs, 2)
-        data.iloc[16] = self.bmk.name
+        data.iloc[14] = round(self.calmar_ratio(), 4)
+        data.iloc[15] = round(self.tracking_error(), 4)
+        data.iloc[16] = round(self.yrs, 2)
+        data.iloc[17] = self.bmk.name
         return data
 
 
