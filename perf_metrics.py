@@ -790,3 +790,73 @@ def ret_vol_scatter(pm_df):
     plt.legend()
     plt.title('Return-Volatility Scatter Plot')
     return
+
+
+def multi_period_df_perf_metrics(
+        df, bmk_str, rf_str, freq='monthly', ls_period=[1, 3, 5, 10, 15, 999],
+        trading_day=True, cols_incl=7):
+    """
+    Loop through a list of periods for the same input DataFrame to run the
+    multi-period performance metrics.
+    :param df: pd.DataFrame, (N x m)
+    :param bmk_str: str, the column name of bmk
+    :param rf_str: str, the column name of rf
+    :param freq: str, 'monthly', 'daily', 'quarterly'
+    :param ls_period: list, a list of period integers
+    :param trading_day: boolean, True or False, True 252 days, False 365
+                        days; only relevant if freq is'daily'
+    :param cols_incl: int, number of columns included in the calculation
+    :return: pm_df
+    """
+    ls_df = []
+    for i in ls_period:
+        pm_df_i = df_perf_metrics(df, bmk_str, rf_str, freq=freq,
+                                  period=i, cols_incl=cols_incl)
+        ls_df.append(pm_df_i)
+    pm_df = pd.concat(ls_df, axis=1)
+    return pm_df
+
+
+def multi_period_perf_comparison_chart(
+        pm_df, title_str='Multi-Period Performance Comparison'):
+    """
+    Plot the multi-period comparison of the performance metrics selected.
+    :param pm_df: pd.DataFrame, (metrics x options across periods)
+    :param title_str: str, title of the figure
+    :return: multi-period comparison chart
+    """
+    # Reformat the input pm_df into seaborn plot format
+    pm_df_plot = pm_df.T.reset_index().rename(columns={'index': 'Option'})
+
+    # Plot the selected metrics
+    fig, axs = plt.subplots(4, 2, figsize=(16, 10))
+    fig.suptitle(title_str, fontsize=15)
+
+    sns.barplot(x='Yrs', y='Annual Return', hue='Option',
+                data=pm_df_plot, ax=axs[0, 0])
+    sns.barplot(x='Yrs', y="Jenson's Alpha", hue='Option',
+                data=pm_df_plot, ax=axs[0, 1])
+    sns.barplot(x='Yrs', y="Annual Vol", hue='Option',
+                data=pm_df_plot, ax=axs[1, 0])
+    sns.barplot(x='Yrs', y="Beta", hue='Option',
+                data=pm_df_plot, ax=axs[1, 1])
+    sns.barplot(x='Yrs', y="Max Drawdown", hue='Option',
+                data=pm_df_plot, ax=axs[2, 0])
+    sns.barplot(x='Yrs', y="CVaR", hue='Option',
+                data=pm_df_plot, ax=axs[2, 1])
+    sns.barplot(x='Yrs', y="Sharpe Ratio", hue='Option',
+                data=pm_df_plot, ax=axs[3, 0])
+    sns.barplot(x='Yrs', y="Calmar Ratio", hue='Option',
+                data=pm_df_plot, ax=axs[3, 1])
+
+    for i in range(4):
+        for j in range(2):
+            axs[i, j].legend([], [], frameon=False)
+
+    handles, labels = axs[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper right')
+
+    fig.tight_layout()
+    fig.show()
+
+    return
