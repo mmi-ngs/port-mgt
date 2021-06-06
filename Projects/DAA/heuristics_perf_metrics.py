@@ -100,3 +100,22 @@ pm.multi_period_perf_comparison_chart(
     pm_df, title_str='Multi-Period Performance Comparison - DAA vs SAA ('
                      'Simulated Indexed Growth)')
 
+'''------------Tactical Rebalancing------------'''
+# Read data
+heuristics_rsi = pd.read_excel(
+    'heuristic z above 0 and rsi below 30 - MSCI World.xlsx', index_col=0)
+taa_ret = heuristics_rsi.pct_change().iloc[1:, :]
+
+taa_ret['rf'] = 0.10 / (100 * 365)
+
+x = pm.df_perf_metrics(taa_ret, 'Portfolio value', 'rf', cols_incl=1,
+                     freq='daily',
+    trading_day=False, period=10)
+x.to_clipboard()
+
+pm_taa = pm.multi_period_df_perf_metrics(
+    taa_ret, 'Portfolio value', 'rf', cols_incl=1, freq='daily',
+    trading_day=False,
+    ls_period=[3, 5, 10, 20, 999])
+pm_taa.to_clipboard()
+
