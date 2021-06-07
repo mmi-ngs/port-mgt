@@ -562,12 +562,27 @@ class SAAOpt(PortOpt):
                     con_i, self._option))
                 continue
 
-            if (con_i == 'Sum') & (type_i == 'Sum'):
+            if (con_i == 'Sum') & (type_i == 'Eq'):
                 sum_i = self.cons_saa.loc[con_i, self._option]
                 self.add_constraint(
                     'eq', 'lambda x: x.sum() - {}'.format(sum_i))
             elif con_i in self.map_saa.columns[2:]:
-                if con_type_i == 'Sub_Sector':
+                if con_type_i == 'Option_PDS':
+                    if type_i == 'Min':
+                        x_min_i = self.cons_saa[self._option].iloc[i]
+                        self.add_constraint(
+                            'ineq', "lambda x: x.T @ np.array({}) - {}".format(
+                                list(self.map_saa.loc[:, con_i]), x_min_i))
+                    elif type_i == 'Max':
+                        x_max_i = self.cons_saa[self._option].iloc[i]
+                        self.add_constraint(
+                            'ineq', "lambda x: {} - x.T @ np.array({})".format(
+                                x_max_i, list(self.map_saa.loc[:, con_i])))
+                    else:
+                        warnings.warn(
+                            'Constraint {} is not added for wrong '
+                            'format.'.format(con_i))
+                elif con_type_i == 'Sub_Sector':
                     # Figure out the sector it belongs to
                     loc_sub_sector_i = \
                         np.where(self.map_saa.loc[:, con_i] > 0)[0]
@@ -598,20 +613,8 @@ class SAAOpt(PortOpt):
                             'Constraint {} is not added for wrong '
                             'format.'.format(con_i))
                 else:
-                    if type_i == 'Min':
-                        x_min_i = self.cons_saa[self._option].iloc[i]
-                        self.add_constraint(
-                            'ineq', "lambda x: x.T @ np.array({}) - {}".format(
-                                list(self.map_saa.loc[:, con_i]), x_min_i))
-                    elif type_i == 'Max':
-                        x_max_i = self.cons_saa[self._option].iloc[i]
-                        self.add_constraint(
-                            'ineq', "lambda x: {} - x.T @ np.array({})".format(
-                                x_max_i, list(self.map_saa.loc[:, con_i])))
-                    else:
-                        warnings.warn(
-                            'Constraint {} is not added for wrong '
-                            'format.'.format(con_i))
+                    raise Exception(
+                        'Unexpected constraint type {}.'.format(con_type_i))
             elif con_type_i == 'Sector_PDS':
                 # Get the location of sub-sectors that belong to the sector.
                 # E.g., for Australian Equities,
@@ -646,17 +649,147 @@ class SAAOpt(PortOpt):
         """
 
         # Check if the optimization has been run
-        if self.wgt_dict is None:
-            raise AttributeError('Weights not yet computed.')
+        if self.wgt_dict is None or self.wgt_dict == {}:
+            raise Exception('Empty dictionary of weight outputs.')
+        elif any(isinstance(i, dict) for i in self.wgt_dict.values()):
+            # Nested dictionary
+            self.df_wgt = ut.nested_dict_to_df(self.wgt_dict)
+        else:
+            # None-Nested dictionary
+            self.df_wgt = pd.DataFrame.from_dict(self.wgt_dict)
+
+        # Initiate a dictionary to store output
+        dict_constraint_check = {}
 
         # Check constraints for each column in the self.df_wgt
-        # multi-index dataframe: index = (option name, obj function)
+        # Basically, each optimization output
+        # multi-index dataframe: (a, b) = (option name, obj function)
         for (a, b) in self.df_wgt.columns:
+            df_wgt_i = self.df_wgt.loc[:, (a, b)]
+            df_constraint_check_i = \
+                pd.DataFrame(np.nan, index=[*self.cons_saa.index.unique()],
+                             columns=['Actual', 'Constraint', 'Check'])
+            # Go through the same procedure as map_saa_constraint() to check
+            # if each constraint is met for this optimization output
+            for i in range(len(df_constraint_check_i.index)):
+                # Name of the constraint (index column)
+                con_i = df_constraint_check_i.index[i]
+                # print(con_i)
+                df_con_i = self.cons_saa.loc[con_i, :]
+                # (falseValue, trueValue)[test==True]
+                con_type_i = (df_con_i['Con_Type'], df_con_i[
+                    'Con_Type'][0])[type(df_con_i) != pd.Series]
 
+                # Check if it's all np.nan for this constraint
+                if np.isnan(self.cons_saa.loc[con_i, a]).sum() == \
+                        self.cons_saa.loc[con_i, a].size:
+                    warnings.warn('No {} constraint for {} option'.format(
+                        con_i, a))
+                    df_constraint_check_i.loc[con_i, :] = np.nan
+                    continue
+
+                # Calculate column 1 'Actual'
+                if con_i == 'Sum':
+                    df_constraint_check_i.loc[con_i, 'Actual'] = df_wgt_i.sum()
+                elif con_i in self.map_saa.columns[2:]:
+                    if con_type_i == 'Option_PDS':
+                        df_constraint_check_i.loc[con_i, 'Actual'] = \
+                            df_wgt_i.T @ self.map_saa.loc[:, con_i]
+                    elif con_type_i == 'Sub_Sector':
+                        # Figure out the sector it belongs to
+                        loc_sub_sector_i = \
+                            np.where(self.map_saa.loc[:, con_i] > 0)[0]
+                        sector_pds_i = self.map_saa.Sector_PDS[
+                            loc_sub_sector_i].unique()[0]
+                        loc_sector_pds_i = \
+                            np.where(self.map_saa.Sector_PDS == sector_pds_i)[0]
+
+                        # Calculate actual sub_sector/sector_pds weight
+                        df_constraint_check_i.loc[con_i, 'Actual'] = \
+                            df_wgt_i.T @ self.map_saa.loc[:, con_i] / \
+                            df_wgt_i.values[list(loc_sector_pds_i)].sum()
+                    else:
+                        raise Exception(
+                            'Unexpected constraint type {}.'.format(con_type_i))
+                elif con_type_i == 'Sector_PDS':
+                    # Get the location of sub-sectors that belong to the sector.
+                    # E.g., for Australian Equities,
+                    # [0, 1] in the self.map_saa.Sector_PDS vector.
+                    loc_sector_pds_i = \
+                        np.where(self.map_saa.Sector_PDS == con_i)[0]
+                    df_constraint_check_i.loc[con_i, 'Actual'] = \
+                        df_wgt_i.values[list(loc_sector_pds_i)].sum()
+                else:
+                    Exception('Unchecked constraint {} of type {}.'.format(
+                        con_i, con_type_i))
+
+                # Map column 2 and 3
+                if type(df_con_i) == pd.Series:
+                    # Type is either 'Eq' or 'Max'/'Min' Alone
+                    if df_con_i['Type'] == 'Eq':
+                        # Col 2
+                        df_constraint_check_i.loc[con_i, 'Constraint'] = \
+                            df_con_i[a]
+                        # Col 3
+                        if np.round(df_constraint_check_i.loc[con_i,
+                                                              'Actual'], 4) == \
+                            df_con_i[a]:
+                            df_constraint_check_i.loc[con_i, 'Check'] = 'Yes'
+                        else:
+                            df_constraint_check_i.loc[con_i, 'Check'] = 'No'
+                    elif df_con_i['Type'] == 'Min':
+                        # Col 2
+                        df_constraint_check_i.loc[con_i, 'Constraint'] = \
+                            '[{}, ]'.format(df_con_i[a])
+                        # Col 3
+                        if np.round(df_constraint_check_i.loc[con_i,
+                                                              'Actual'], 4) >= \
+                            df_con_i[a]:
+                            df_constraint_check_i.loc[con_i, 'Check'] = 'Yes'
+                        else:
+                            df_constraint_check_i.loc[con_i, 'Check'] = 'No'
+                    elif df_con_i['Type'] == 'Max':
+                        # Col 2
+                        df_constraint_check_i.loc[con_i, 'Constraint'] = \
+                            '[, {}]'.format(df_con_i[a])
+                        # Col 3
+                        if np.round(df_constraint_check_i.loc[con_i,
+                                                              'Actual'], 4) <= \
+                                df_con_i[a]:
+                            df_constraint_check_i.loc[con_i, 'Check'] = 'Yes'
+                        else:
+                            df_constraint_check_i.loc[con_i, 'Check'] = 'No'
+                    else:
+                        raise Exception('Unexpected constraint type other '
+                                        'than Eq, Min, or Max!')
+                elif df_con_i.index.size == 2:
+                    # Type is 'Min' and 'Max' together
+                    min_mask_i = (df_con_i.Type == 'Min')
+                    max_mask_i = (df_con_i.Type == 'Max')
+                    # Col 2
+                    df_constraint_check_i.loc[con_i, 'Constraint'] = \
+                        '[{}, {}]'.format(df_con_i.loc[min_mask_i, a][0],
+                                          df_con_i.loc[max_mask_i, a][0])
+                    # Col 3
+                    if (np.round(df_constraint_check_i.loc[con_i, 'Actual'],
+                                 4) >= df_con_i.loc[min_mask_i, a][0]) & (
+                        np.round(df_constraint_check_i.loc[con_i, 'Actual'],
+                                 4) <= df_con_i.loc[max_mask_i, a][0]):
+                        df_constraint_check_i.loc[con_i, 'Check'] = 'Yes'
+                    else:
+                        df_constraint_check_i.loc[con_i, 'Check'] = 'No'
+                else:
+                    raise Exception('Constraint {} has unexpected number of '
+                                    'rows! Should be 1 or 2.'.format(con_i))
+            dict_constraint_check[(a, b)] = df_constraint_check_i
+
+        # Put the nested dictionary to dataframe
+        self.df_constraint_check = ut.nested_dict_to_df(dict_constraint_check)
 
         return self.df_constraint_check
 
-    def options_opt_run(self, obj_str, args, bounds=None, print_res=False):
+    def options_opt_run(self, obj_str, args, bounds=None, print_res=False,
+                        check_constraints=True):
         """
         Loop through all the options in the self.options for optimization.
         Run the self.opt_run() method for each option and each objective
@@ -690,6 +823,11 @@ class SAAOpt(PortOpt):
             self.wgt_dict = {}
         self.wgt_dict = self._wgt_dict_options
 
+        # Check SAA Constraints
+        if check_constraints:
+            # Results stored in self.df_constraint_check
+            self.check_saa_constraints()
+
         return self.res_opt_options
 
     def export_saa_output(self, save_excel=False, filename="saa_output.xlsx"):
@@ -711,29 +849,27 @@ class SAAOpt(PortOpt):
         """
 
         # Get the export_wgt output first (asset level - 1st hierarchy weights)
-        if self.wgt_dict is None or self.wgt_dict == {}:
-            raise Exception('Empty dictionary of weight outputs.')
-        elif any(isinstance(i, dict) for i in self.wgt_dict.values()):
-            # Nested dictionary
-            self.df_wgt = ut.nested_dict_to_df(self.wgt_dict)
-            # None-Nested dictionary
+        if self.df_wgt is None:
+            raise Exception('Check SAA Constraints not run yet. Set '
+                            'check_constraints kwarg to True and rerun '
+                            'options_opt_run().')
         else:
-            self.df_wgt = pd.DataFrame.from_dict(self.wgt_dict)
-
-        self.dict_export['Asset_Wgt'] = self.df_wgt
+            self.dict_export['Asset_Wgt'] = self.df_wgt
 
         # Group wgts into different hierarchies ('Sector_PDS', 'Sector_InvTeam')
         # Specified in self.map_saa first two cols
         for i in ['Sector_PDS', 'Sector_InvTeam']:
             df_i = pd.concat([self.df_wgt, self.map_saa[[i]]], axis=1)
             df_wgt_i = df_i.groupby(by=i, sort=False).sum()
+            df_wgt_i.loc['Sum', :] = df_wgt_i.sum(axis=0)
             self.dict_export['{}_Wgt'.format(i)] = df_wgt_i
+
+        # Add constraints check to self.dict_export
+        self.dict_export['Constraints_Check'] = self.df_constraint_check
 
         if save_excel:
             with pd.ExcelWriter(filename) as writer:
                 for i in self.dict_export:
-                    df_export_i = self.dict_export[i].copy()
-                    df_export_i.loc['Sum', :] = df_export_i.sum(axis=0)
-                    df_export_i.to_excel(writer, sheet_name=i)
+                    self.dict_export[i].to_excel(writer, sheet_name=i)
 
         return self.dict_export
