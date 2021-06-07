@@ -40,15 +40,15 @@ saa_opt = SAAOpt(map_saa, cons_saa, options, n_assets=N,
                  tickers=sub_sectors, bounds=bounds)
 res_multi_options = saa_opt.options_opt_run(obj_list, args_obj, bounds=bounds,
                                             print_res=False)
-wgt_multi_options = saa_opt.export_wgt(save_csv=True,
-                                       filename='saa_test_run_result.csv')
 
+wgt_multi_options = saa_opt.export_saa_output(save_excel=False,
+                                              filename='saa_output.xlsx')
 
+df_saa_wgt = saa_opt.df_wgt
 
-
-
-
-
+for (a, b) in df_saa_wgt.columns:
+    print(a)
+    print(df_saa_wgt.loc[:, (a, b)])
 
 
 

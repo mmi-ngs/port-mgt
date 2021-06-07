@@ -6,9 +6,9 @@ bounds.
 The parent class PortOpt can be inherited to several use cases, e.g., SAA, DAA,
 within-sector optimization. The child classes are also maintained here.
 
-The optimization algorithm is based on scipy.optimize.shgo, which is the
-go-to approach for relatively low dimensional settings. For SAA, DAA,
-and within-sector optimization, it seems to be the best performer.
+The optimization algorithm is based on scipy.optimize.shgo/slsqp. shgo is the
+go-to approach for relatively low dimensional settings while slsqp is used
+for high dimensional settings.
 (ref: https://www.microprediction.com/blog/optimize)
 """
 
@@ -208,6 +208,7 @@ class PortOpt(PortOptBase):
 
     ### Public Methods ###
     add_constraint(): add a constraint for optimization
+    check_constraint(): check if the constraints are met
     add_clean_wgt(): rounds up to 2 decimals, add as a series to the wgt_dict
     export_wgt(): save weights to csv file
 
@@ -245,7 +246,8 @@ class PortOpt(PortOptBase):
 
     def add_constraint(self, type_str, fun_str):
         """
-        Add a constraint to scipy.shgo optimizer. The format of constraint is:
+        Add a constraint to scipy.shgo/slsqp optimizer. The format of
+        constraint is:
         ({'type': 'eq', 'fun': lambda x: x.sum() - 1},
          {'type': 'ineq', 'fun': lambda x: x - wgt_min},
          {'type': 'ineq', 'fun': lambda x: wgt_max - x})
@@ -273,7 +275,7 @@ class PortOpt(PortOptBase):
                 *If a list is passed, generate outcomes from different objective
                 functions.
         :param args: [tuple] or [dict(tuple)]
-                Arguments passed on for scipy.optimize.shgo optimizers.
+                Arguments passed on for scipy.optimize.shgo/slqlp optimizers.
                 e.g., For 'max_sharpe', args = (ret, cov, rf=0.0025,
                 negative=True).
                 *If a dictionary of tuples is passed, the keys should
@@ -284,6 +286,8 @@ class PortOpt(PortOptBase):
         :param bounds: [list/tuple] redefine the bounds for the optimization run
                 *If None, use instance variable self.bounds.
         :param print_res: [boolean] print results if True
+
+        :return self._res_opt
         """
         # Objective functions
         if isinstance(obj_str, list):
@@ -421,7 +425,10 @@ class SAAOpt(PortOpt):
     ### Unique public methods ###:
     map_saa_constraints(): Automatically map the SAA constraints to the
                             optimizer with two key prefixed tables.
+    check_saa_constraints(): Check and export whether each constraint is met
+                             and export the outcome.
     saa_perf_metrics(): Compute the SAA-related performance metrics.
+    export_saa_output(): save all useful dataframes to a single excel file.
 
     ### Instance variables ###
     n_assets: [int] number of assets
@@ -433,6 +440,8 @@ class SAAOpt(PortOpt):
 
     wgt: [np.array] np.array of asset weights
     wgt_dict: [dict] dictionary of all optimized or input clean weights
+    df_wgt: [pd.DataFrame] DataFrame of wgt_dict
+    df_constraint_check: [pd.DataFrame] DataFrame of saa constraints check
 
     ### Public Methods ###
     add_constraint(): add a constraint for optimization
@@ -493,6 +502,9 @@ class SAAOpt(PortOpt):
         self._wgt_dict_options = {}
 
         # Optimization output
+        self.df_wgt = None
+        self.df_constraint_check = None
+        self.dict_export = {}
         self.res_opt_options = {}
 
     def set_option(self, option):
@@ -625,6 +637,25 @@ class SAAOpt(PortOpt):
                 warnings.warn(
                   'Constraint {} is not added for wrong format.'.format(con_i))
 
+    def check_saa_constraints(self):
+        """
+        Check whether the saa constraints are met in the output weight and
+        export the results. Used after the self.options_opt_run() function.
+
+        :return: [DataFrame]
+        """
+
+        # Check if the optimization has been run
+        if self.wgt_dict is None:
+            raise AttributeError('Weights not yet computed.')
+
+        # Check constraints for each column in the self.df_wgt
+        # multi-index dataframe: index = (option name, obj function)
+        for (a, b) in self.df_wgt.columns:
+
+
+        return self.df_constraint_check
+
     def options_opt_run(self, obj_str, args, bounds=None, print_res=False):
         """
         Loop through all the options in the self.options for optimization.
@@ -661,3 +692,48 @@ class SAAOpt(PortOpt):
 
         return self.res_opt_options
 
+    def export_saa_output(self, save_excel=False, filename="saa_output.xlsx"):
+        """
+        Utility function to export all output to a DataFrame and save weights
+        to an excel file.
+        The exported dataframes include:
+        1. Asset_Wgt
+        2. Sector_PDS_Wgt
+        3. Sector_InvTeam_Wgt
+        *4. Constraints_Check
+        *5. Perf_Metrics
+        *6. Regulatory_Metrics
+
+        :param: save_excel [boolean] save to an Excel file if True.
+        :param: filename [str] name of file. Should be xlsx.
+
+        :return: self.dict_export [dict] a dictionary of all export dataframes
+        """
+
+        # Get the export_wgt output first (asset level - 1st hierarchy weights)
+        if self.wgt_dict is None or self.wgt_dict == {}:
+            raise Exception('Empty dictionary of weight outputs.')
+        elif any(isinstance(i, dict) for i in self.wgt_dict.values()):
+            # Nested dictionary
+            self.df_wgt = ut.nested_dict_to_df(self.wgt_dict)
+            # None-Nested dictionary
+        else:
+            self.df_wgt = pd.DataFrame.from_dict(self.wgt_dict)
+
+        self.dict_export['Asset_Wgt'] = self.df_wgt
+
+        # Group wgts into different hierarchies ('Sector_PDS', 'Sector_InvTeam')
+        # Specified in self.map_saa first two cols
+        for i in ['Sector_PDS', 'Sector_InvTeam']:
+            df_i = pd.concat([self.df_wgt, self.map_saa[[i]]], axis=1)
+            df_wgt_i = df_i.groupby(by=i, sort=False).sum()
+            self.dict_export['{}_Wgt'.format(i)] = df_wgt_i
+
+        if save_excel:
+            with pd.ExcelWriter(filename) as writer:
+                for i in self.dict_export:
+                    df_export_i = self.dict_export[i].copy()
+                    df_export_i.loc['Sum', :] = df_export_i.sum(axis=0)
+                    df_export_i.to_excel(writer, sheet_name=i)
+
+        return self.dict_export
