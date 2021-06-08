@@ -42,12 +42,10 @@ res_multi_options = saa_opt.options_opt_run(obj_list, args_obj, bounds=bounds,
                                             print_res=False,
                                             check_constraints=True)
 
-wgt_multi_options = saa_opt.export_saa_output(save_excel=True,
-                                              filename='saa_output.xlsx')
+export_multi_options = saa_opt.export_saa_output(
+    save_excel=False, filename='saa_output_tight.xlsx')
 
-
-
-
+x = saa_opt.visualize_efficient_frontier((exp_ret, exp_cov))
 
 
 """
