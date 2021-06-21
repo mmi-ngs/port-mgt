@@ -15,9 +15,14 @@ for high dimensional settings.
 import warnings
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scipy
 from scipy.optimize import shgo, minimize, dual_annealing
 
 import port_opt.objective_functions as obj
+import port_opt.simulation as sim
+import perf_metrics as pm
 import utils as ut
 
 
@@ -449,7 +454,7 @@ class SAAOpt(PortOpt):
     export_wgt(): save weights to csv file
     """
 
-    def __init__(self, map_saa, cons_saa, options, n_assets,
+    def __init__(self, map_saa, cons_saa, options, option_map, n_assets,
                  tickers=None, long_short=False, bounds=(0, 1)):
         """
         :param map_saa: [pd.DataFrame]
@@ -468,6 +473,11 @@ class SAAOpt(PortOpt):
         :param options: [str] / [list(str)] the option name used for
                         optimization. Can be a list. The name has to be in
                         the con_saa columns to read the specified constraint.
+        :param option_map: [pd.DataFrame] index=options
+               TABLE RESTRICTIONS:
+               1. index == options
+               2. include columns ['Objective', 'Objective_Horizon',
+                                   'Accumulation', 'Income']
         :param n_assets: [int] number of assets, should be the same as the
                          index size of map_saa and con_saa.
         :param tickers: [list(str)] list of strings of asset names
@@ -496,14 +506,23 @@ class SAAOpt(PortOpt):
         else:
             raise TypeError('Input options is not string or list.')
 
+        # Check whether options and option_map index are matching
+        if self.options != [*option_map.index]:
+            raise Exception('option_map input has incorrect options list.')
+        else:
+            self.option_map = option_map
+
         # Protected variables
         self._option = None
+        self._option_obj = None
+        self._option_obj_horizon = None
         self._constraints_option = None
         self._wgt_dict_options = {}
 
         # Optimization output
         self.df_wgt = None
         self.df_constraint_check = None
+        self.df_perf_metrics = None
         self.dict_export = {}
         self.res_opt_options = {}
 
@@ -789,7 +808,7 @@ class SAAOpt(PortOpt):
         return self.df_constraint_check
 
     def options_opt_run(self, obj_str, args, bounds=None, print_res=False,
-                        check_constraints=True):
+                        check_constraints=True, opt_perf_metrics=True, **kwargs):
         """
         Loop through all the options in the self.options for optimization.
         Run the self.opt_run() method for each option and each objective
@@ -828,7 +847,47 @@ class SAAOpt(PortOpt):
             # Results stored in self.df_constraint_check
             self.check_saa_constraints()
 
+        # Generate Regulatory Performance Metrics
+        if opt_perf_metrics:
+            # Results stored in self.df_perf_metrics
+            self.opt_perf_metrics(**kwargs)
+
         return self.res_opt_options
+
+    def opt_perf_metrics(self, exp_ret, exp_cov, fx_hedge=0.5, cpi=0.024):
+        """
+        Calculate the standard performance metrics for optimized weights.
+        :param exp_ret: [pd.Series] (N x ), expected return,
+        :param exp_cov: [pd.DataFrame] (N x N) expected covariance matrix
+        :param fx_hedge: [float] foreign currency hedging ratio, default = 0.5
+        :param cpi: [float] 10-yr cpi assumption
+        :return: df_perf_metrics
+        """
+        # Check if the optimization has been run
+        if self.wgt_dict is None or self.wgt_dict == {}:
+            raise Exception('Empty dictionary of weight outputs.')
+        elif any(isinstance(i, dict) for i in self.wgt_dict.values()):
+            # Nested dictionary
+            self.df_wgt = ut.nested_dict_to_df(self.wgt_dict)
+        else:
+            # None-Nested dictionary
+            self.df_wgt = pd.DataFrame.from_dict(self.wgt_dict)
+
+        # Initiate a dictionary to store output
+        list_perf_metrics = []
+        for (a, b) in self.df_wgt.columns:
+            self._option = a
+            self._option_obj = self.option_map.loc[self._option, 'Objective']
+            self._option_obj_horizon = self.option_map.loc[self._option,
+                                                           'Objective_Horizon']
+            list_perf_metrics.append(pm.OptionPerfMetrics(
+                self.df_wgt.loc[:, (a, b)], exp_ret, exp_cov, self._option_obj,
+                self._option_obj_horizon, self.map_saa[['Growth_PDS']],
+                self.map_saa[['FX_PDS']], self.map_saa[['Illiquidity_PDS']],
+                fx_hedge=fx_hedge, cpi=cpi).standard_metrics())
+
+        self.df_perf_metrics = pd.concat(list_perf_metrics, axis=1)
+        return self.df_perf_metrics
 
     def export_saa_output(self, save_excel=False, filename="saa_output.xlsx"):
         """
@@ -838,9 +897,9 @@ class SAAOpt(PortOpt):
         1. Asset_Wgt
         2. Sector_PDS_Wgt
         3. Sector_InvTeam_Wgt
-        *4. Constraints_Check
-        *5. Perf_Metrics
-        *6. Regulatory_Metrics
+        4. Constraints_Check
+        5. Regulatory_Metrics (OptionPerfMetrics)
+        *6. Perf_Metrics (needs data)
 
         :param: save_excel [boolean] save to an Excel file if True.
         :param: filename [str] name of file. Should be xlsx.
@@ -867,9 +926,126 @@ class SAAOpt(PortOpt):
         # Add constraints check to self.dict_export
         self.dict_export['Constraints_Check'] = self.df_constraint_check
 
+        # Add regulatory metrics to self.dict_export
+        self.dict_export['Regulatory Metrics'] = self.df_perf_metrics
+
         if save_excel:
             with pd.ExcelWriter(filename) as writer:
                 for i in self.dict_export:
                     self.dict_export[i].to_excel(writer, sheet_name=i)
 
         return self.dict_export
+
+    def visualize_efficient_frontier(self, args, ef_type='Mean-Var',
+                                     constrained=False, rf=0.0025,
+                                     n_samples=1000):
+        """
+        This function allows visualization of the efficient
+        frontier based on simulation results.
+        * The default opt_type is mean-variance optimization using
+          'max_quad_utility' function.
+        * The default plot is to plot all existing optimization results on the
+          same efficient frontier.
+
+        :param args [tuple] different arguments required for different ef_type
+               'Mean-Var': args = (exp_ret, exp_cov)
+               'Mean-CVaR': args = (df_ret, exp_ret, exp_cov)
+               'Mean-TE': args = (exp_ret, exp_cov, bmk_wgt)
+        :param ef_type [str] default 'Mean-Var'
+               Efficient frontier type.
+               Available types: 'Mean-Var', 'Mean-CVaR', 'Mean-TE'
+               *under development: 'Mean-CVar', 'Mean-TE'
+        :param constrained [boolean] default False
+               Define whether the random portfolio weights are also constrained.
+        :param rf [float] risk-free rate used to calculate Sharpe Ratio
+        :param n_samples [int] number of random weights generated from
+               Dirichlet distribution
+        :return:
+        """
+        # Get len(a) and len(b)
+        #   len(a): Number of options - color
+        color_dict = {}
+        color_list = ut.cmap_rgba('tab20', len(self.options))
+        for i in range(len(self.options)):
+            # np.random.seed(i)
+            color_dict[self.options[i]] = color_list[i]
+
+        #   len(b): Number of objective_functions - marker
+        marker_list = ['*', 'P', 'X', 'o', 'd', 's']
+        marker_dict = {}
+        for i in range(len(self._objective_list)):
+            marker_dict[self._objective_list[i]] = marker_list[i]
+
+        if ef_type == 'Mean-Var':
+            # Start with the default 'Mean-Var' optimization and return a
+            # 'Exp_Ret-Volatility' chart
+            # Minimum Requirement: args = (exp_ret, exp_cov)
+            exp_ret, exp_cov = args
+
+            # Ret-Vol Scatter Plot
+            plt.figure(figsize=(10, 8))
+            plt.title('Efficient Frontier with Random Portfolios')
+
+            for (a, b) in self.df_wgt.columns:
+                # Plot the dots - random weights
+                df_wgt_random = sim.random_weights(self.n_assets, n_samples,
+                                                   alpha=0.3)
+                vol_random = np.sqrt(np.diag(df_wgt_random @ exp_cov @
+                                             df_wgt_random.T))
+                ret_random = df_wgt_random.dot(exp_ret)
+                sharpe_random = (ret_random - rf) / vol_random
+                plt.scatter(vol_random, ret_random, marker=".", alpha=0.5,
+                            c=sharpe_random, cmap='viridis', zorder=0)
+
+                # Plot the stars - optimized weights
+                df_wgt_i = self.df_wgt.loc[:, (a, b)]
+                vol_i = pm.port_vol(df_wgt_i, exp_cov, freq='yearly')
+                ret_i = pm.port_ret(df_wgt_i, exp_ret, freq='yearly')
+                plt.scatter(vol_i, ret_i, c=color_dict[a],
+                            marker=marker_dict[b], s=250,
+                            label='{}-{}'.format(a, b), zorder=10)
+
+            # Plot the line - efficient frontier
+            wgt_ef = []
+            ret_ef = []
+            vol_ef = []
+            for i in np.linspace(1, 200, 100):
+                args_i = (exp_ret, exp_cov, i)
+                # Clear objective_list, otherwise the algo will keep append.
+                # self._objective_list = []
+                # self.clear_constraints()
+                # self.add_constraint('eq', 'lambda x: x.sum() - 1')
+                # res_i = self.opt_run('max_quad_utility', args_i,
+                #                      bounds=self.bounds,
+                #                      print_res=False)['max_quad_utility']
+                self._objective = obj.call_obj_functions('max_quad_utility')
+                res_i = minimize(self._objective,
+                                 x0=self._wgt0,
+                                 bounds=self.bounds, args=args_i,
+                                 method='SLSQP',
+                                 constraints=
+                                 {'type': 'eq', 'fun': lambda x: x.sum() - 1},
+                                 options={'maxiter': 10000, 'disp': True})
+                wgt_ef.append(res_i.x)
+                ret_ef.append(np.dot(res_i.x, exp_ret))
+                vol_ef.append(np.sqrt(res_i.x.T @ exp_cov @ res_i.x))
+            plt.plot(vol_ef, ret_ef, c='blue', linestyle='dashed', zorder=10,
+                     label='Unconstrained Efficient Frontier')
+
+            # Plot the rest
+            plt.colorbar()
+            plt.xlabel('Volatility')
+            plt.ylabel('Return')
+            plt.legend(loc='upper left', bbox_to_anchor=(1.15, 0.9))
+            plt.show()
+        elif ef_type == 'Mean-CVaR' or ef_type == 'Mean-TE':
+            print('Mean-CVaR and Mean-TE approaches are under construction.')
+
+        # Prepare the output dataframe
+        df_wgt_ef = pd.DataFrame(wgt_ef, columns=self.tickers)
+        df_ret_ef = pd.Series(ret_ef, name='Ret')
+        df_vol_ef = pd.Series(vol_ef, name='Vol')
+
+        df_output = pd.concat([df_ret_ef, df_vol_ef, df_wgt_ef], axis=1)
+
+        return df_output

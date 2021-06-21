@@ -6,8 +6,9 @@ different objective functions.
 
 The implemented objective functions include:
 * Max Sharpe
-* Max IR
 * Min Variance
+* Max Quadratic Utility
+* Max CRRA Utility
 * Min CVaR
 * Max Calmar
 * Hierarchical Risk Parity (Marcos De Lopez, 2016)
@@ -30,7 +31,8 @@ def call_obj_functions(obj_str):
     """
     obj_avail = {'min_var': port_var,
                  'max_sharpe': sharpe_ratio,
-                 'max_quad_utility': quadratic_utility}
+                 'max_quad_utility': quadratic_utility,
+                 'max_crra_utility': crra_utility}
     if obj_str in obj_avail.keys():
         obj_func = obj_avail[obj_str]
     else:
@@ -115,8 +117,56 @@ def quadratic_utility(wgt, ret, cov, risk_aversion, rf=0.0025, negative=True):
         raise AttributeError('Dimensions of [wgt, ret, cov] are not [1, 1, 2].')
 
     sign = -1 if negative else 1
-    quad_utility = \
+    quad_util = \
         sign * (wgt.T @ ret - rf - 0.5 * risk_aversion * wgt.T @ cov @ wgt)
-    return quad_utility
+    return quad_util
 
 
+def crra_utility(wgt, ret, period, risk_aversion, negative=True, freq='yearly'):
+    """
+    CRRA utility function over expected wealth in period years.
+
+    Given that CRRA utility function takes in expected wealth as an input.
+    The ret parameter has to be expected return. Can either be specified
+    directly in annualized terms or use Monte-Carlo simulation to get the
+    expected return. If simulation takes the forward-looking period into
+    account, then specify period=1, freq='yearly' to avoid double accounting.
+
+    Equations:
+    1. U(W) = W ^ (1-A) / (1-A), where A > 0 and A != 1
+    2. W = wgt.T @ ret
+    max {wgt}: [wgt.T @ E(ret) * period] ^ (1-A) / (1-A)
+
+    :param wgt: [np.ndarray] (Nx1) weight of assets
+    :param ret: [np.ndarray] (Nx1) expected return of assets, annualized
+    :param period: [int] forward-looking horizon period (in years)
+           NOTE: If ret parameter gives the adjusted expected return in 10
+           years time, the period is specified as 1. If ret parameter gives
+           expected return in annualized terms, the period is specified as 10
+           for a 10-year ahead expected wealth calculation.
+    :param risk_aversion: [float] relative risk aversion coefficient.
+                          Higher risk_aversion, lower portfolio risk.
+    :param negative: [boolean] set True if return negative value
+    :param freq: [str] the frequency of the parameter period
+                 default: 'yearly', e.g., 1 year forward-looking horizon
+    :return: crra_utility: [float] value of the objective function
+    """
+    if not (isinstance(wgt, np.ndarray) & isinstance(ret, np.ndarray) &
+            isinstance(period, int) &
+            (isinstance(risk_aversion, float) or isinstance(risk_aversion, int))
+            & isinstance(negative, bool) & isinstance(freq, str)):
+        raise TypeError(
+            'At least one input out of '
+            '[wgt, ret, period, risk_aversion, negative, freq]'
+            ' is not matching '
+            '[np.ndarray, np.ndarray, int, float/int, bool, str].')
+
+    if not ((wgt.ndim == 1) & (ret.ndim == 1)):
+        raise AttributeError('Dimensions of [wgt, ret] are not [1, 1].')
+
+    sign = -1 if negative else 1
+    period_adj = period * ut.freq_adj(freq=freq)
+    wealth_t = (1 + wgt.T @ ret) ** period_adj
+    crra_util = \
+        sign * wealth_t ** (1 - risk_aversion) / (1 - risk_aversion)
+    return crra_util

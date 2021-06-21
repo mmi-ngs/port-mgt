@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from scipy.stats import skew, kurtosis
+from scipy.stats import skew, kurtosis, norm, lognorm
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -33,7 +33,7 @@ class PerfMetrics:
                 see ut.freq_adj() parameter description.
         """
         self.metrics_list = ['Annual Return', 'Annual Vol', 'Alpha',
-                             "Jenson's Alpha",
+                             "Jensen's Alpha",
                              'Beta',
                              'Upside Capture', 'Downside Capture',
                              'Skewness', 'Kurtosis', 'Max Drawdown',
@@ -834,7 +834,7 @@ def multi_period_perf_comparison_chart(
 
     sns.barplot(x='Yrs', y='Annual Return', hue='Option',
                 data=pm_df_plot, ax=axs[0, 0])
-    sns.barplot(x='Yrs', y="Jenson's Alpha", hue='Option',
+    sns.barplot(x='Yrs', y="Jensen's Alpha", hue='Option',
                 data=pm_df_plot, ax=axs[0, 1])
     sns.barplot(x='Yrs', y="Annual Vol", hue='Option',
                 data=pm_df_plot, ax=axs[1, 0])
@@ -860,3 +860,240 @@ def multi_period_perf_comparison_chart(
     fig.show()
 
     return
+
+
+class OptionPerfMetrics:
+    """
+    Calculate the standard option-level performance metrics due to regulatory
+    requirements.
+
+    Require inputs at the asset/sector level. Details see __init__ function.
+    """
+
+    def __init__(self, asset_wgt, exp_ret, exp_cov, obj,
+                 obj_horizon, growth_wgt, fx_wgt, illiq_wgt, fx_hedge=0.5,
+                 cpi=0.024):
+        """
+        ---Inputs---
+        :param asset_wgt: [pd.Series] (N x ), asset/sector weight for a
+                          specific option
+        :param exp_ret: [pd.Series] (N x ), expected return,
+        :param exp_cov: [pd.DataFrame] (N x N) expected covariance matrix
+        :param obj: [float] Absolute objective return
+        :param obj_horizon: [int] years
+        :param growth_wgt: [pd.Series] (N x ), growth split of each asset/sector
+        :param fx_wgt: [pd.Series] (N x ), fx exposure of each asset/sector
+        :param illiq_wgt: [pd.Series] (N x ), illiquidity exposure of each
+                          asset/sector
+        :param fx_hedge: [float] foreign currency hedging ratio, default = 0.5
+        :param cpi: [float] 10-yr cpi assumption
+        """
+        self.metrics_list = [
+            'Expected return, before tax (%)',
+            'Expected volatility, before tax (%)',
+            'Illiquid exposure (%)',
+            'Growth assets (%)',
+            'Defensive assets (%)',
+            'Foreign currency exposure (%)',
+            'Probability of meeting objective over stated horizon (%)',
+            'Probability of exceeding CPI over 1 year (%)',
+            'Probability of negative annual return in 1 year (%)',
+            'Freq. of negative annual return (1 in X years)',
+            '5th percentile of annual return (%)',
+            '95th percentile of annual return (%)',
+            'APRA standard risk measures (X in 20 years)',
+            'APRA risk label',
+            'Fx Hedging Ratio']
+
+        # Inputs & dimension check
+        if not isinstance(asset_wgt, pd.Series):
+            raise TypeError('asset_wgt parameter is not pd.Series.')
+
+        self.N = asset_wgt.index.size
+        shape = [exp_ret.shape, exp_cov.shape,
+                 growth_wgt.shape, fx_wgt.shape, illiq_wgt.shape]
+
+        if shape != [(self.N, ), (self.N, self.N), (self.N, 1),
+                     (self.N, 1), (self.N, 1)]:
+            [print(i) for i in shape]
+            raise ValueError('Shape of input incompatible with requirements!')
+
+        # Get inputs
+        self.asset_names = [*asset_wgt.index]
+        self.option_name = asset_wgt.name
+        self.asset_wgt = asset_wgt.values
+        self.exp_ret = exp_ret
+        self.exp_cov = exp_cov
+        self.obj = obj
+        self.obj_horizon = obj_horizon
+        self.growth_wgt = growth_wgt
+        self.illiq_wgt = illiq_wgt
+        self.fx_wgt = fx_wgt
+        self.fx_hedge = fx_hedge
+        self.cpi = cpi
+
+        self.port_ret = self.asset_wgt.T @ self.exp_ret
+        self.port_vol = np.sqrt(self.asset_wgt.T @ self.exp_cov @
+                                self.asset_wgt)
+        self.port_illiq = self.asset_wgt.T @ self.illiq_wgt
+        self.port_growth = self.asset_wgt.T @ self.growth_wgt
+        self.port_fx = self.asset_wgt.T @ self.fx_wgt
+        self.prob_meet_target = prob_meet_obj(self.port_ret, self.port_vol,
+                                              self.obj, self.obj_horizon)
+        self.prob_meet_cpi = prob_meet_obj(self.port_ret, self.port_vol,
+                                           self.cpi, 1)
+        self.prob_neg_return = prob_negative_return(self.port_ret,
+                                                    self.port_vol, 1)
+        self.fifth_percentile = norm.ppf(0.05, self.port_ret, self.port_vol)
+        self.nintyfifth_percentile = norm.ppf(0.95, self.port_ret,
+                                              self.port_vol)
+        self.apra_srm, self.apra_risk_label = apra_standard_risk_measure(
+            self.port_ret, self.port_vol)
+
+    def standard_metrics(self):
+        """
+        Calculate all the standard metrics for an investment option.
+
+        :return: [pd.Series] (N x ) return all metrics in self.metrics_list
+        """
+        data = pd.Series(np.nan, index=self.metrics_list,
+                         name=self.option_name)
+
+        # The same order as self.metrics_list
+        data.iloc[0] = round(self.port_ret * 100, 2)
+        data.iloc[1] = round(self.port_vol * 100, 2)
+        data.iloc[2] = round(self.port_illiq * 100, 2)
+        data.iloc[3] = round(self.port_growth * 100, 2)
+        data.iloc[4] = round((1 - self.port_growth) * 100, 2)
+        data.iloc[5] = round(self.port_fx * 100, 2)
+        data.iloc[6] = round(self.prob_meet_target * 100, 2)
+        data.iloc[7] = round(self.prob_meet_cpi * 100, 2)
+        data.iloc[8] = round(self.prob_neg_return * 100, 2)
+        data.iloc[9] = round(1 / self.prob_neg_return, 2)
+        data.iloc[10] = round(self.fifth_percentile * 100, 2)
+        data.iloc[11] = round(self.nintyfifth_percentile * 100, 2)
+        data.iloc[12] = round(self.apra_srm, 2)
+        data.iloc[13] = self.apra_risk_label
+        data.iloc[14] = round(self.fx_hedge * 100, 2)
+
+        return data
+
+
+def prob_meet_obj(ret, vol, target, obj_horizon):
+    """
+    Calculate the probability of meeting investment objective.
+    (Close-form solution, no simulation for computing efficiency)
+    Assume lognormal distribution for gross return (1+r_p).
+
+    :param: ret [float] portfolio return
+    :param: vol [float] portfolio volatility
+    :param: target [float] 0.05 = 5% absolute target
+    :param: obj_horizon [int] years, the stated horizon for meeting
+            objective
+
+    :return: prob [float]
+    """
+    ret_gross = ret + 1
+    vol_adj = vol / np.sqrt(obj_horizon)
+
+    # Transform into the sigma/s and mu for scipy.stats.lognorm()
+    # parameterization
+    s = np.sqrt(np.log(vol_adj ** 2 / ret_gross ** 2 + 1))
+    mu = np.log(ret_gross) - 0.5 * s ** 2
+
+    prob = 1 - lognorm.cdf(target+1, s=s, scale=np.exp(mu))
+
+    return prob
+
+
+def prob_negative_return(ret, vol, horizon):
+    """
+    Calculate the probability of negative return.
+    (Close-form solution, no simulation for computing efficiency)
+
+    :param: ret [float] portfolio return
+    :param: vol [float] portfolio volatility
+    :param: horizon [int] years, the horizon for calculation
+
+    :return: prob [float]
+    """
+    ret_gross = ret + 1
+    vol_adj = vol / np.sqrt(horizon)
+
+    # Transform into the sigma/s and mu for scipy.stats.lognorm()
+    # parameterization
+    s = np.sqrt(np.log(vol_adj ** 2 / ret_gross ** 2 + 1))
+    mu = np.log(ret_gross) - 0.5 * s ** 2
+
+    prob = lognorm.cdf(1, s=s, scale=np.exp(mu))
+
+    return prob
+
+
+def apra_standard_risk_measure(ret, vol, horizon=20):
+    """
+    Calculate the APRA standard risk measure. Use before-tax measures for
+    calculation.
+    SRM = 1 / probability of negative returns in 20 years
+
+    :param: ret [float] portfolio return
+    :param: vol [float] portfolio volatility
+    :param: horizon [int] years, the horizon for calculation
+
+    :return: srm, risk_label
+    """
+
+    srm = horizon / prob_negative_return(ret, vol, horizon)
+
+    risk_label = "N/A"
+    if srm < 0.5:
+        risk_label = 'Very low'
+    elif 0.5 <= srm < 1:
+        risk_label = 'Low'
+    elif 1 <= srm < 2:
+        risk_label = 'Low to medium'
+    elif 2 <= srm < 3:
+        risk_label = 'Medium'
+    elif 3 <= srm < 4:
+        risk_label = 'Medium to high'
+    elif 4 <= srm < 6:
+        risk_label = 'High'
+    elif srm >= 6:
+        risk_label = 'Very high'
+
+    return srm, risk_label
+
+
+def df_option_perf_metrics(df_wgt, exp_ret, exp_cov, obj,
+                           obj_horizon, growth_wgt, fx_wgt, illiq_wgt,
+                           fx_hedge=0.5, cpi=0.024):
+    """
+    ---Inputs---
+    :param df_wgt: [pd.DataFrame] (N x k), asset/sector weight for k options
+    :param exp_ret: [pd.Series] (N x ), expected return,
+    :param exp_cov: [pd.DataFrame] (N x N) expected covariance matrix
+    :param obj: [float] Absolute objective target
+    :param obj_horizon: [int] years
+    :param growth_wgt: [pd.Series] (N x ), growth split of each asset/sector
+    :param fx_wgt: [pd.Series] (N x ), fx exposure of each asset/sector
+    :param illiq_wgt: [pd.Series] (N x ), illiquidity exposure of each
+                      asset/sector
+    :param fx_hedge: [float] foreign currency hedging ratio, default = 0.5
+    :param cpi: [float] 10-yr cpi assumption
+
+    :return: df_res:
+    """
+    # Check input
+    if not isinstance(df_wgt, pd.DataFrame):
+        raise TypeError('df_wgt input is not DataFrame!')
+
+    output_list = []
+    for i in df_wgt.columns:
+        print(i)
+        asset_wgt_i = df_wgt.loc[:, i]
+        output_list.append(OptionPerfMetrics(
+            asset_wgt_i, exp_ret, exp_cov, obj, obj_horizon,
+            growth_wgt, fx_wgt, illiq_wgt,
+            fx_hedge=fx_hedge, cpi=cpi).standard_metrics())
+    df_res = pd.concat(output_list, axis=1)
+    return df_res

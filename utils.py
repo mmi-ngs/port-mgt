@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import math
 import functools
+import matplotlib
 from dateutil.relativedelta import relativedelta
 
 
@@ -282,3 +283,33 @@ def nested_dict_to_df(input_dict, orient='columns'):
         {(i, j): input_dict[i][j] for i in input_dict.keys()
          for j in input_dict[i].keys()}, orient=orient)
     return df
+
+
+def random_rgba(alpha=1):
+    """
+    Create an autocycler based on the RGB color tuple rules.
+
+    :return: rgba color tuple, e.g., (0.1, 0.2, 0.5, 0.3).
+    """
+    r = np.random.random()
+    g = np.random.random()
+    b = np.random.random()
+    rgba = (r, g, b, alpha)
+    return rgba
+
+
+def cmap_rgba(cmap, n_colors):
+    """
+    Use matplotlib.cm.get_cmap to get cmap and use evenly spaced
+    color on the color line.
+
+    :param: cmap [str] matplotlib cmap name, e.g., 'rainbow'
+    :param: n_colors [int] number of colors needed
+    :return: rgba_list [list] a list of rgba colors selected from rainbow cmap
+    """
+    x = matplotlib.cm.get_cmap(cmap)
+    n = np.linspace(0, 1, n_colors)
+    rgba_list = []
+    for i in n:
+        rgba_list.append(x(i))
+    return rgba_list
