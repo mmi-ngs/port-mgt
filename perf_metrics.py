@@ -872,12 +872,12 @@ class OptionPerfMetrics:
 
     def __init__(self, asset_wgt, exp_ret, exp_cov, obj,
                  obj_horizon, growth_wgt, fx_wgt, illiq_wgt, fx_hedge=0.5,
-                 cpi=0.024):
+                 cpi=0.024, after_tax=False, tax_map=None, tax_account=None):
         """
         ---Inputs---
         :param asset_wgt: [pd.Series] (N x ), asset/sector weight for a
                           specific option
-        :param exp_ret: [pd.Series] (N x ), expected return,
+        :param exp_ret: [pd.Series] (N x ), expected return, before tax
         :param exp_cov: [pd.DataFrame] (N x N) expected covariance matrix
         :param obj: [float] Absolute objective return
         :param obj_horizon: [int] years
@@ -887,6 +887,12 @@ class OptionPerfMetrics:
                           asset/sector
         :param fx_hedge: [float] foreign currency hedging ratio, default = 0.5
         :param cpi: [float] 10-yr cpi assumption
+        :param after_tax: [boolean] calculate after-tax performance metrics
+               or not
+        :param tax_map: [pd.DataFrame] (2N x 10) input into
+                        pm.after_tax_exp_ret() function
+        :param tax_account: [str] 'Accumulation' / 'Income',
+                            see pm.after_tax_exp_ret() function inputs.
         """
         self.metrics_list = [
             'Expected return, before tax (%)',
@@ -903,7 +909,9 @@ class OptionPerfMetrics:
             '95th percentile of annual return (%)',
             'APRA standard risk measures (X in 20 years)',
             'APRA risk label',
-            'Fx Hedging Ratio']
+            'Fx Hedging Ratio',
+            'Objective (%)',
+            'Objective Horizon (in years)']
 
         # Inputs & dimension check
         if not isinstance(asset_wgt, pd.Series):
@@ -913,16 +921,29 @@ class OptionPerfMetrics:
         shape = [exp_ret.shape, exp_cov.shape,
                  growth_wgt.shape, fx_wgt.shape, illiq_wgt.shape]
 
-        if shape != [(self.N, ), (self.N, self.N), (self.N, 1),
-                     (self.N, 1), (self.N, 1)]:
+        if shape != [(self.N, ), (self.N, self.N), (self.N, ),
+                     (self.N, ), (self.N, )]:
             [print(i) for i in shape]
             raise ValueError('Shape of input incompatible with requirements!')
+
+        if after_tax:
+            if tax_map is None or tax_account is None:
+                raise ValueError('tax_map and tax_account cannot be None if '
+                                 'after_tax is True.')
+            else:
+                # If after_tax, use after_tax_exp_ret as self.exp_ret for main
+                # calc, use exp_ret_before_tax to calculate apra_standard_error
+                self.exp_ret = after_tax_exp_ret(tax_map, exp_ret, tax_account)
+                self.exp_ret_before_tax = exp_ret
+                self.metrics_list[0] = 'Expected return, after tax (%)'
+        else:
+            self.exp_ret = exp_ret
+            self.exp_ret_before_tax = exp_ret
 
         # Get inputs
         self.asset_names = [*asset_wgt.index]
         self.option_name = asset_wgt.name
         self.asset_wgt = asset_wgt.values
-        self.exp_ret = exp_ret
         self.exp_cov = exp_cov
         self.obj = obj
         self.obj_horizon = obj_horizon
@@ -948,7 +969,7 @@ class OptionPerfMetrics:
         self.nintyfifth_percentile = norm.ppf(0.95, self.port_ret,
                                               self.port_vol)
         self.apra_srm, self.apra_risk_label = apra_standard_risk_measure(
-            self.port_ret, self.port_vol)
+            self.asset_wgt.T @ self.exp_ret_before_tax, self.port_vol)
 
     def standard_metrics(self):
         """
@@ -975,6 +996,8 @@ class OptionPerfMetrics:
         data.iloc[12] = round(self.apra_srm, 2)
         data.iloc[13] = self.apra_risk_label
         data.iloc[14] = round(self.fx_hedge * 100, 2)
+        data.iloc[15] = round(self.obj * 100, 2)
+        data.iloc[16] = round(self.obj_horizon, 2)
 
         return data
 
@@ -1034,7 +1057,7 @@ def apra_standard_risk_measure(ret, vol, horizon=20):
     """
     Calculate the APRA standard risk measure. Use before-tax measures for
     calculation.
-    SRM = 1 / probability of negative returns in 20 years
+    SRM =  probability of negative returns in 1 year * 20
 
     :param: ret [float] portfolio return
     :param: vol [float] portfolio volatility
@@ -1043,7 +1066,7 @@ def apra_standard_risk_measure(ret, vol, horizon=20):
     :return: srm, risk_label
     """
 
-    srm = horizon / prob_negative_return(ret, vol, horizon)
+    srm = horizon * prob_negative_return(ret, vol, 1)
 
     risk_label = "N/A"
     if srm < 0.5:
@@ -1064,22 +1087,32 @@ def apra_standard_risk_measure(ret, vol, horizon=20):
     return srm, risk_label
 
 
-def df_option_perf_metrics(df_wgt, exp_ret, exp_cov, obj,
-                           obj_horizon, growth_wgt, fx_wgt, illiq_wgt,
-                           fx_hedge=0.5, cpi=0.024):
+def df_option_perf_metrics(df_wgt, exp_ret, exp_cov, obj_list,
+                           obj_horizon_list, growth_wgt, fx_wgt, illiq_wgt,
+                           fx_hedge=0.5, cpi=0.024, after_tax=False,
+                           tax_map=None, tax_account_list=None):
     """
     ---Inputs---
     :param df_wgt: [pd.DataFrame] (N x k), asset/sector weight for k options
     :param exp_ret: [pd.Series] (N x ), expected return,
     :param exp_cov: [pd.DataFrame] (N x N) expected covariance matrix
-    :param obj: [float] Absolute objective target
-    :param obj_horizon: [int] years
+    :param obj_list: [list of float] list of absolute objective target for
+                     each df_wgt column
+    :param obj_horizon_list: [list of int] list of obj_horizon in years for
+                             each df_wgt column
     :param growth_wgt: [pd.Series] (N x ), growth split of each asset/sector
     :param fx_wgt: [pd.Series] (N x ), fx exposure of each asset/sector
     :param illiq_wgt: [pd.Series] (N x ), illiquidity exposure of each
                       asset/sector
     :param fx_hedge: [float] foreign currency hedging ratio, default = 0.5
     :param cpi: [float] 10-yr cpi assumption
+    :param after_tax: [boolean] calculate after-tax performance metrics
+           or not
+    :param tax_map: [pd.DataFrame] (2N x 10) input into
+                    pm.after_tax_exp_ret() function
+    :param tax_account_list: [list of str] list of account types for each
+                             option, account = 'Accumulation' / 'Income';
+                             see pm.after_tax_exp_ret() function inputs.
 
     :return: df_res:
     """
@@ -1087,13 +1120,85 @@ def df_option_perf_metrics(df_wgt, exp_ret, exp_cov, obj,
     if not isinstance(df_wgt, pd.DataFrame):
         raise TypeError('df_wgt input is not DataFrame!')
 
+    # Check dimensions
+    if (df_wgt.shape[1] != len(obj_list) or df_wgt.shape[1] != len(
+            obj_horizon_list)):
+        raise AttributeError('The dimension of df_wgt does not match with the '
+                             'length of the obj_list or obj_horizon_list')
+
     output_list = []
-    for i in df_wgt.columns:
-        print(i)
-        asset_wgt_i = df_wgt.loc[:, i]
+    for i in range(df_wgt.columns.size):
+        print(df_wgt.columns[i])
+        asset_wgt_i = df_wgt.iloc[:, i]
+        obj_i = obj_list[i]
+        obj_horizon_i = obj_horizon_list[i]
+        tax_account_i = tax_account_list[i]
         output_list.append(OptionPerfMetrics(
-            asset_wgt_i, exp_ret, exp_cov, obj, obj_horizon,
+            asset_wgt_i, exp_ret, exp_cov, obj_i, obj_horizon_i,
             growth_wgt, fx_wgt, illiq_wgt,
-            fx_hedge=fx_hedge, cpi=cpi).standard_metrics())
+            fx_hedge=fx_hedge, cpi=cpi, after_tax=after_tax, tax_map=tax_map,
+            tax_account=tax_account_i
+        ).standard_metrics())
     df_res = pd.concat(output_list, axis=1)
     return df_res
+
+
+def after_tax_exp_ret(tax_map, exp_ret, account='Accumulation'):
+    """
+    Calculate after-tax expected return based on the tax_map table and
+    exp_ret series.
+
+    :param: tax_map: [pd.DataFrame] (2 * n_assets x 10)
+            All tax-related parameters to calculate after-tax measures.
+            TABLE RESTRICTIONS:
+            1. index == tickers/assets/sub-sectors
+            2. first column ['Account'] has both 'Income' and 'Accumulation'
+               each account has the a full table with all assets listed.
+            3. rest of the columns:
+               ['CRS', 'PFr', 'Tc', 'PD', 'DTc', 'Def Tax', 'Ts', 'Tp', 'Ta']
+    :param: exp_ret: [pd.Series] (n_assets x 1)
+    :param: account: account type of the tax schedule.
+                     default: 'Accumulation'; alternative: 'Income'.
+    :return: exp_ret_after_tax: [pd.Series] (n_assets x 1)
+    """
+    # Dimension check
+    if tax_map.shape[0] != exp_ret.shape[0] * 2:
+        raise AttributeError('The tax_map index should have double the length '
+                             'of the exp_ret index!')
+
+    # Value check
+    if not (account == 'Accumulation' or account == 'Income'):
+        raise ValueError("Parameter account has undefined value. Should be "
+                         "either 'Accumulation' or 'Income'.")
+
+    tax_map_account = tax_map.loc[tax_map.Account == account]
+
+    # Map variables
+    PFr = tax_map_account.loc[:, 'PFr']
+    Tc = tax_map_account.loc[:, 'Tc']
+    PD = tax_map_account.loc[:, 'PD']
+    DTc = tax_map_account.loc[:, 'DTc']
+    Def_Tax = tax_map_account.loc[:, 'Def Tax']
+    Ts = tax_map_account.loc[:, 'Ts']
+    Tp = tax_map_account.loc[:, 'Tp']
+    Ta = tax_map_account.loc[:, 'Ta']
+
+    # Calculation
+    cap_ret = exp_ret * tax_map_account.loc[:, 'CRS']
+    div_ret = exp_ret - cap_ret
+
+    tax_on_div_ret = div_ret - (
+            div_ret * (PFr / (1 - Tc) + (1 - PFr)) * (1 - Ts))
+    tax_on_cap_ret = cap_ret * (1 - Def_Tax) * (PD * DTc + (1-PD) * Ts)
+    implied_tax_ret = (tax_on_div_ret + tax_on_cap_ret) / exp_ret + Ta
+    exp_ret_after_tax = exp_ret * (1 - implied_tax_ret)
+
+    return exp_ret_after_tax
+
+
+
+
+
+
+
+

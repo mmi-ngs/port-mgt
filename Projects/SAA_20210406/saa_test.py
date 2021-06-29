@@ -4,7 +4,6 @@ import os
 import seaborn as sns
 
 from port_opt.port_opt import SAAOpt
-import port_opt.objective_functions as obj
 import perf_metrics as pm
 
 os.chdir(r'.\Projects\SAA_20210406')
@@ -16,96 +15,106 @@ map_saa = pd.read_excel(xls, 'map', index_col=0)
 saa = pd.read_excel(xls, 'saa', index_col=0)
 cons_saa = pd.read_excel(xls, 'cons', index_col=0)
 option_map = pd.read_excel(xls, 'option_map', index_col=0)
-exp_ret_vol = pd.read_excel(xls, 'exp_ret_vol', index_col=0)
-exp_rho = pd.read_excel(xls, 'exp_corr', index_col=0)
+tax_map = pd.read_excel(xls, 'tax_map', index_col=0)
+cma = pd.read_excel(xls, 'cma', index_col=0)
+exp_rho_frontier = pd.read_excel(xls, 'exp_corr', index_col=0)
+hist_rho_fs = pd.read_excel(xls, 'hist_corr', index_col=0)
 
-exp_cov = np.diag(exp_ret_vol.iloc[:, 1]) @ exp_rho @ \
-    np.diag(exp_ret_vol.iloc[:, 1])
+growth_wgt = map_saa.loc[:, 'Growth_PDS']
+fx_wgt = map_saa.loc[:, 'FX_PDS']
+illiq_wgt = map_saa.loc[:, 'Illiquidity_PDS']
+
+N = map_saa.index.size
+
+curr_saa = saa.iloc[:N, :]
+prop_saa = saa.iloc[N+1:2*N+1, :]
+
+# Specify CMA assumptions
+exp_ret_vol_frontier = cma.loc[:, ['Exp_Ret_Frontier', 'Exp_Vol_Frontier']]
+exp_ret_vol_mean = cma.loc[:, ['Exp_Ret_Mean', 'Exp_Vol_Mean']]
+hist_ret_vol_fs = cma.loc[:, ['Hist_Ret_FS', 'Hist_Vol_FS']]
+
+exp_cov_frontier = np.diag(exp_ret_vol_frontier.iloc[:, 1]) @ exp_rho_frontier\
+                  @ np.diag(exp_ret_vol_frontier.iloc[:, 1])
+exp_cov_mean = np.diag(exp_ret_vol_mean.iloc[:, 1]) @ exp_rho_frontier\
+                  @ np.diag(exp_ret_vol_mean.iloc[:, 1])
+hist_cov_fs = np.diag(hist_ret_vol_fs.iloc[:, 1]) @ hist_rho_fs\
+                  @ np.diag(hist_ret_vol_fs.iloc[:, 1])
 
 # Set optimization parameters
-N = map_saa.index.size
 sub_sectors = [*map_saa.index]
 options = [*cons_saa.columns[2:]]
 option_i = 'Diversified'
 
 bounds = (0, 1)
 
-exp_ret = exp_ret_vol.iloc[:, 0].values
-exp_cov = exp_cov.values
-
-# Test all options and three objective functions
-# obj_list = ['max_sharpe', 'min_var', 'max_quad_utility']
-# args_obj = {'max_sharpe': (exp_ret, exp_cov, 0.0025, True),
-#             'min_var': (exp_cov, ),
-#             'max_quad_utility': (exp_ret, exp_cov, 3)}
+'''---------Specify which set of CMA assumptions to use----------------'''
+exp_ret = exp_ret_vol_frontier.iloc[:, 0].values
+exp_cov = exp_cov_frontier.values
 
 # Test all options with one objective function
 obj_list = ['max_sharpe']
 args_obj = {'max_sharpe': (exp_ret, exp_cov, 0.0025, True)}
 
-saa_opt = SAAOpt(map_saa, cons_saa, options, option_map, n_assets=N,
-                 tickers=sub_sectors, bounds=bounds)
-res_multi_options = saa_opt.options_opt_run(obj_list, args_obj, bounds=bounds,
+saa_opt = SAAOpt(map_saa, cons_saa, options, option_map, tax_map,
+                 exp_ret, exp_cov, n_assets=N, tickers=sub_sectors,
+                 bounds=bounds)
+res_multi_options = saa_opt.options_opt_run(obj_list, args_obj,
+                                            after_tax=True,
                                             print_res=False,
                                             check_constraints=True,
-                                            opt_perf_metrics=True,
-                                            exp_ret=exp_ret, exp_cov=exp_cov)
+                                            opt_perf_metrics=True)
 
 export_multi_options = saa_opt.export_saa_output(
-    save_excel=True, filename='saa_output_max_sr.xlsx')
+    save_excel=False, filename='saa_output_max_sr_frontier_at.xlsx')
 
-df_ef = saa_opt.visualize_efficient_frontier((exp_ret, exp_cov),
-                                             n_samples=3000)
+# Efficient Frontier
+df_ef, df_random = saa_opt.visualize_efficient_frontier((exp_ret, exp_cov),
+                                                        n_samples=3000)
 
 # Split the efficient frontier line to 4 quartiles
-df_ef.loc[:, 'Vol_Quartile'] = pd.cut(df_ef.loc[:, 'Vol'], 4,
-                                      labels=[1, 2, 3, 4])
-x = df_ef.groupby('Vol_Quartile').agg({'min', 'max'}).T
+dict_split = {}
+for str_x in ['df_ef', 'df_random']:
+    df_split = eval(str_x)
+    dict_split[str_x] = df_split
+    df_split.loc[:, 'Vol_Quartile'] = pd.cut(df_split.loc[:, 'Vol'], 4,
+                                             labels=[1, 2, 3, 4])
+    x = df_split.groupby('Vol_Quartile').agg({'min', 'max'}).T
 
-df_ef_range = pd.DataFrame(np.nan, index=df_ef.columns[:-1],
-                           columns=[1, 2, 3, 4])
-for a in df_ef_range.index:
-    for b in df_ef_range.columns:
-        min_ab = round(x.loc[(a, 'min'), b] * 100, 2)
-        max_ab = round(x.loc[(a, 'max'), b] * 100, 2)
-        df_ef_range.loc[a, b] = '[{}%, {}%]'.format(min_ab, max_ab)
-df_ef_range.to_clipboard()
-df_ef.to_clipboard()
-# g = sns.catplot(kind='box', data=x.iloc[:, 2:],
-#                 col_wrap=2)
-# (g.set_xticklabels(sub_sectors, rotation=45, fontsize=10)
-#  .tight_layout())
+    df_split_range = pd.DataFrame(np.nan, index=df_split.columns[:-1],
+                                  columns=[1, 2, 3, 4])
+    for a in df_split_range.index:
+        for b in df_split_range.columns:
+            min_ab = round(x.loc[(a, 'min'), b] * 100, 2)
+            max_ab = round(x.loc[(a, 'max'), b] * 100, 2)
+            df_split_range.loc[a, b] = '[{}%, {}%]'.format(min_ab, max_ab)
+    dict_split[str_x + '_split'] = df_split
+    dict_split[str_x + '_split_range'] = df_split_range
 
+# Export to excel
+with pd.ExcelWriter('ef_simulation_output.xlsx') as writer:
+    for i in dict_split:
+        dict_split[i].to_excel(writer, sheet_name=i)
 
-# Test the OptionPerfMetrics
-x = export_multi_options['Asset_Wgt']
-growth_wgt = map_saa[['Growth_PDS']]
-fx_wgt = map_saa[['FX_PDS']]
-illiq_wgt = map_saa[['Illiquidity_PDS']]
-x_metrics = pm.OptionPerfMetrics(x.iloc[:, 0], exp_ret_vol.iloc[:, :2],
-                                 exp_cov, 0.03, 5, growth_wgt, fx_wgt,
-                                 illiq_wgt).standard_metrics()
+"""-----------Calculate Perf Metrics (Frontier CMA vs Mean_CMA)----------"""
+# Get the obj_list and obj_horizon_list for the options in the curr_saa
+obj_list_curr_saa = []
+obj_horizon_list_curr_saa = []
+account_curr_saa = []
 
-"""
-# Test one option and one objective function
-saa_opt = SAAOpt(map_saa, cons_saa, option_i, n_assets=N,
-                 tickers=sub_sectors, bounds=bounds)
-saa_opt.map_saa_constraints(option_i)
+for i in curr_saa.columns:
+    obj_list_curr_saa.append(option_map.loc[i, 'Objective'])
+    obj_horizon_list_curr_saa.append(option_map.loc[i, 'Objective_Horizon'])
+    account_curr_saa.append(option_map.loc[i, 'Account'])
 
-args_sharpe = (exp_ret, exp_cov, 0.0025, True)
-res_sharpe = saa_opt.opt_run('max_sharpe', args_sharpe, bounds=bounds,
-                             print_res=True)
-wgt_sharpe = saa_opt.export_wgt()
+# curr_saa vs prop_saa vs opt_saa
+saa_i = curr_saa
 
-# Test one option and three objective functions
-saa_opt = SAAOpt(map_saa, cons_saa, option_i, n_assets=N,
-                 tickers=sub_sectors, bounds=bounds)
-saa_opt.map_saa_constraints(option_i)
-
-
-res_multi_obj = saa_opt.opt_run(obj_list, args_obj, bounds=bounds,
-                                print_res=True)
-wgt_multi_obj = saa_opt.export_wgt()
-"""
+saa_i_metrics = pm.df_option_perf_metrics(
+    saa_i, exp_ret, exp_cov, obj_list_curr_saa,
+    obj_horizon_list_curr_saa,
+    growth_wgt, fx_wgt, illiq_wgt, after_tax=True, tax_map=tax_map,
+    tax_account_list=account_curr_saa)
+saa_i_metrics.to_clipboard()
 
 

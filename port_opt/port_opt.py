@@ -169,7 +169,7 @@ class PortOptBase:
         """
         if wgt is not None:
             if round(wgt.sum(), 2) != self._wgt_sum:
-                raise ValueError(
+                warnings.warn(
                     'New weights do not sum up to {} (sum={})'.format(
                         self._wgt_sum, wgt.sum()))
             else:
@@ -177,7 +177,7 @@ class PortOptBase:
         else:
             if self.wgt is not None:
                 if round(self.wgt.sum(), 2) != self._wgt_sum:
-                    raise ValueError(
+                    warnings.warn(
                         'Weights do not sum up to {} (sum={})'.format(
                             self._wgt_sum, self.wgt.sum()))
             else:
@@ -454,8 +454,9 @@ class SAAOpt(PortOpt):
     export_wgt(): save weights to csv file
     """
 
-    def __init__(self, map_saa, cons_saa, options, option_map, n_assets,
-                 tickers=None, long_short=False, bounds=(0, 1)):
+    def __init__(self, map_saa, cons_saa, options, option_map, tax_map,
+                 exp_ret, exp_cov, n_assets, tickers=None, long_short=False,
+                 bounds=(0, 1), **kwargs):
         """
         :param map_saa: [pd.DataFrame]
                TABLE RESTRICTIONS:
@@ -463,6 +464,8 @@ class SAAOpt(PortOpt):
                2. first two columns are ['Sector_PDS', 'Sector_InvTeam']
                3. third column onwards are the ticker's exposure to the
                   constraint bucket
+               4. have columns ['Growth_PDS', 'FX_PDS', Illiquidity_PDS']
+                  for weight assignments
         :param cons_saa: [pd.DataFrame] index=assets/sub-sectors
                TABLE RESTRICTIONS:
                1. index == constraint name
@@ -478,6 +481,16 @@ class SAAOpt(PortOpt):
                1. index == options
                2. include columns ['Objective', 'Objective_Horizon',
                                    'Accumulation', 'Income']
+        :param tax_map: [pd.DataFrame] (2 * n_assets x 10)
+               All tax-related parameters to calculate after-tax measures.
+               TABLE RESTRICTIONS:
+               1. index == tickers/assets/sub-sectors
+               2. first column ['Account'] has both 'Income' and 'Accumulation'
+                  each account has the a full table with all assets listed.
+               3. rest of the columns:
+                  ['CRS', 'PFr', 'Tc', 'PD', 'DTc', 'Def Tax', 'Ts', 'Tp', 'Ta']
+        :param exp_ret [array] (N x 1)
+        :param exp_cov [array] (N x N)
         :param n_assets: [int] number of assets, should be the same as the
                          index size of map_saa and con_saa.
         :param tickers: [list(str)] list of strings of asset names
@@ -489,7 +502,18 @@ class SAAOpt(PortOpt):
 
         self.map_saa = map_saa
         self.cons_saa = cons_saa
+        self.assets = [*self.map_saa.index]
         self.sectors = [*self.map_saa['Sector_PDS'].unique()]
+        self.tax_map = tax_map
+
+        # Feature Weights
+        self.growth_wgt = self.map_saa.loc[:, 'Growth_PDS']
+        self.fx_wgt = self.map_saa.loc[:, 'FX_PDS']
+        self.illiq_wgt = self.map_saa.loc[:, 'Illiquidity_PDS']
+
+        # CMA assumptions
+        self.exp_ret = exp_ret
+        self.exp_cov = exp_cov
 
         # Check whether options are all in the cons_saa columns:
         if isinstance(options, list):
@@ -516,6 +540,9 @@ class SAAOpt(PortOpt):
         self._option = None
         self._option_obj = None
         self._option_obj_horizon = None
+        self._option_tax_account = None
+        self._bounds_option = None
+        self._bounds_dict = {}
         self._constraints_option = None
         self._wgt_dict_options = {}
 
@@ -585,6 +612,19 @@ class SAAOpt(PortOpt):
                 sum_i = self.cons_saa.loc[con_i, self._option]
                 self.add_constraint(
                     'eq', 'lambda x: x.sum() - {}'.format(sum_i))
+            elif con_i == 'Prob_Meet_Objective':
+                self._option_obj = self.option_map.loc[
+                    self._option, 'Objective']
+                self._option_obj_horizon = self.option_map.loc[
+                    self._option, 'Objective_Horizon']
+                x_min_i = self.cons_saa[self._option].iloc[i]
+                self.add_constraint(
+                    'ineq', 'lambda x: pm.prob_meet_obj(x.T @ np.array({}), '
+                            'np.sqrt(x.T @ np.frombuffer({}).reshape({}, {}) '
+                            '@ x), {}, {}) - {}'.format(
+                        list(self.exp_ret), self.exp_cov.tostring(),
+                        self.n_assets, self.n_assets, self._option_obj,
+                        self._option_obj_horizon, x_min_i))
             elif con_i in self.map_saa.columns[2:]:
                 if con_type_i == 'Option_PDS':
                     if type_i == 'Min':
@@ -655,9 +695,28 @@ class SAAOpt(PortOpt):
                     warnings.warn(
                         'Constraint {} is not added for wrong format.'.format(
                             con_i))
+            elif con_type_i == 'Asset_Bound':
+                # 'Asset_Bound' constraint is added as weight bounds into the
+                # optimizer.
+                continue
             else:
                 warnings.warn(
                   'Constraint {} is not added for wrong format.'.format(con_i))
+
+        # Add asset bounds for optimization
+        mask_asset_bounds = self.cons_saa.Con_Type == 'Asset_Bound'
+        df_asset_bounds = self.cons_saa.loc[mask_asset_bounds, :]
+
+        # Check dimension
+        if df_asset_bounds.shape[0] != 2 * self.n_assets:
+            raise ValueError(
+                'The Asset_Bound constraints do not match the number of assets!'
+                ' {} != 2*{}'.format(df_asset_bounds.shape[0], self.n_assets))
+
+        for a in self.options:
+            bound_min_a = df_asset_bounds.loc[df_asset_bounds.Type == 'Min', a]
+            bound_max_a = df_asset_bounds.loc[df_asset_bounds.Type == 'Max', a]
+            self._bounds_dict[a] = list(zip(bound_min_a, bound_max_a))
 
     def check_saa_constraints(self):
         """
@@ -710,6 +769,13 @@ class SAAOpt(PortOpt):
                 # Calculate column 1 'Actual'
                 if con_i == 'Sum':
                     df_constraint_check_i.loc[con_i, 'Actual'] = df_wgt_i.sum()
+                elif con_i == 'Prob_Meet_Objective':
+                    df_constraint_check_i.loc[con_i, 'Actual'] = \
+                        pm.prob_meet_obj(
+                            df_wgt_i.T @ self.exp_ret,
+                            np.sqrt(df_wgt_i.T @ self.exp_cov @ df_wgt_i),
+                            self.option_map.loc[a, 'Objective'],
+                            self.option_map.loc[a, 'Objective_Horizon'])
                 elif con_i in self.map_saa.columns[2:]:
                     if con_type_i == 'Option_PDS':
                         df_constraint_check_i.loc[con_i, 'Actual'] = \
@@ -738,6 +804,10 @@ class SAAOpt(PortOpt):
                         np.where(self.map_saa.Sector_PDS == con_i)[0]
                     df_constraint_check_i.loc[con_i, 'Actual'] = \
                         df_wgt_i.values[list(loc_sector_pds_i)].sum()
+                elif con_type_i == 'Asset_Bound':
+                    # Use df_wgt_i directly for actual
+                    df_constraint_check_i.loc[con_i, 'Actual'] = \
+                        df_wgt_i.loc[con_i]
                 else:
                     Exception('Unchecked constraint {} of type {}.'.format(
                         con_i, con_type_i))
@@ -807,7 +877,7 @@ class SAAOpt(PortOpt):
 
         return self.df_constraint_check
 
-    def options_opt_run(self, obj_str, args, bounds=None, print_res=False,
+    def options_opt_run(self, obj_str, args, print_res=False, after_tax=True,
                         check_constraints=True, opt_perf_metrics=True, **kwargs):
         """
         Loop through all the options in the self.options for optimization.
@@ -829,9 +899,26 @@ class SAAOpt(PortOpt):
             self.clear_constraints()
             self.map_saa_constraints(self._option)
 
+            if self._bounds_dict[self._option] is not None:
+                self._bounds_option = self._bounds_dict[self._option]
+            else:
+                self._bounds_option = self.bounds
+
+            # Convert before-tax exp_ret into after-tax
+            if after_tax:
+                for k in args.keys():
+                    # Construct a list since tuple cannot be changed
+                    list_arg_k = list(args[k])
+                    list_arg_k[0] = pm.after_tax_exp_ret(
+                        self.tax_map, args[k][0],
+                        account=self.option_map.loc[self._option,
+                                                    'Account']).values
+                    args[k] = tuple(list_arg_k)
+
             # Run optimization and Store results for each objective function
             self.res_opt_options[self._option] = \
-                self.opt_run(obj_str, args, bounds=bounds, print_res=print_res)
+                self.opt_run(obj_str, args, bounds=self._bounds_option,
+                             print_res=print_res)
 
             # Add self.wgt_dict to the self._wgt_dict_options dictionary
             self._wgt_dict_options[self._option] = self.wgt_dict
@@ -854,13 +941,15 @@ class SAAOpt(PortOpt):
 
         return self.res_opt_options
 
-    def opt_perf_metrics(self, exp_ret, exp_cov, fx_hedge=0.5, cpi=0.024):
+    def opt_perf_metrics(self, fx_hedge=0.5, cpi=0.024, after_tax=True):
         """
         Calculate the standard performance metrics for optimized weights.
         :param exp_ret: [pd.Series] (N x ), expected return,
         :param exp_cov: [pd.DataFrame] (N x N) expected covariance matrix
         :param fx_hedge: [float] foreign currency hedging ratio, default = 0.5
         :param cpi: [float] 10-yr cpi assumption
+        :param after_tax: [boolean] provide after-tax performance metrics
+
         :return: df_perf_metrics
         """
         # Check if the optimization has been run
@@ -880,11 +969,19 @@ class SAAOpt(PortOpt):
             self._option_obj = self.option_map.loc[self._option, 'Objective']
             self._option_obj_horizon = self.option_map.loc[self._option,
                                                            'Objective_Horizon']
-            list_perf_metrics.append(pm.OptionPerfMetrics(
-                self.df_wgt.loc[:, (a, b)], exp_ret, exp_cov, self._option_obj,
-                self._option_obj_horizon, self.map_saa[['Growth_PDS']],
-                self.map_saa[['FX_PDS']], self.map_saa[['Illiquidity_PDS']],
-                fx_hedge=fx_hedge, cpi=cpi).standard_metrics())
+            self._option_tax_account = self.option_map.loc[self._option,
+                                                           'Account']
+            perf_metrics_i = pm.OptionPerfMetrics(
+                self.df_wgt.loc[:, (a, b)], self.exp_ret, self.exp_cov,
+                self._option_obj,
+                self._option_obj_horizon, self.map_saa.loc[:, 'Growth_PDS'],
+                self.map_saa.loc[:, 'FX_PDS'],
+                self.map_saa.loc[:, 'Illiquidity_PDS'],
+                fx_hedge=fx_hedge, cpi=cpi, after_tax=after_tax,
+                tax_map=self.tax_map,
+                tax_account=self._option_tax_account).standard_metrics()
+
+            list_perf_metrics.append(perf_metrics_i)
 
         self.df_perf_metrics = pd.concat(list_perf_metrics, axis=1)
         return self.df_perf_metrics
@@ -927,7 +1024,7 @@ class SAAOpt(PortOpt):
         self.dict_export['Constraints_Check'] = self.df_constraint_check
 
         # Add regulatory metrics to self.dict_export
-        self.dict_export['Regulatory Metrics'] = self.df_perf_metrics
+        self.dict_export['Regulatory_Metrics'] = self.df_perf_metrics
 
         if save_excel:
             with pd.ExcelWriter(filename) as writer:
@@ -941,7 +1038,9 @@ class SAAOpt(PortOpt):
                                      n_samples=1000):
         """
         This function allows visualization of the efficient
-        frontier based on simulation results.
+        frontier with simulated random portfolios. The function also returns
+        a dataframe summarizing the efficient frontier points (ret, vol,
+        wgt) as well as random portfolio points (ret, vol, wgt).
         * The default opt_type is mean-variance optimization using
           'max_quad_utility' function.
         * The default plot is to plot all existing optimization results on the
@@ -960,7 +1059,7 @@ class SAAOpt(PortOpt):
         :param rf [float] risk-free rate used to calculate Sharpe Ratio
         :param n_samples [int] number of random weights generated from
                Dirichlet distribution
-        :return:
+        :return: df_ef, df_random [pd.DataFrame]
         """
         # Get len(a) and len(b)
         #   len(a): Number of options - color
@@ -1011,13 +1110,6 @@ class SAAOpt(PortOpt):
             vol_ef = []
             for i in np.linspace(1, 200, 100):
                 args_i = (exp_ret, exp_cov, i)
-                # Clear objective_list, otherwise the algo will keep append.
-                # self._objective_list = []
-                # self.clear_constraints()
-                # self.add_constraint('eq', 'lambda x: x.sum() - 1')
-                # res_i = self.opt_run('max_quad_utility', args_i,
-                #                      bounds=self.bounds,
-                #                      print_res=False)['max_quad_utility']
                 self._objective = obj.call_obj_functions('max_quad_utility')
                 res_i = minimize(self._objective,
                                  x0=self._wgt0,
@@ -1042,10 +1134,32 @@ class SAAOpt(PortOpt):
             print('Mean-CVaR and Mean-TE approaches are under construction.')
 
         # Prepare the output dataframe
+        # 1. EF portfolios
         df_wgt_ef = pd.DataFrame(wgt_ef, columns=self.tickers)
         df_ret_ef = pd.Series(ret_ef, name='Ret')
         df_vol_ef = pd.Series(vol_ef, name='Vol')
+        df_sharpe_ef = pd.Series((df_ret_ef - rf) / df_vol_ef, name='Sharpe')
+        df_growth_ef = pd.Series(df_wgt_ef @ self.growth_wgt, name='Growth')
+        df_illiq_ef = pd.Series(df_wgt_ef @ self.illiq_wgt, name='Illiquidity')
+        df_fx_ef = pd.Series(df_wgt_ef @ self.fx_wgt, name='FX')
 
-        df_output = pd.concat([df_ret_ef, df_vol_ef, df_wgt_ef], axis=1)
+        df_ef = pd.concat([df_ret_ef, df_vol_ef, df_sharpe_ef, df_growth_ef,
+                           df_illiq_ef, df_fx_ef, df_wgt_ef], axis=1)
 
-        return df_output
+        # 2. Random portfolios
+        df_wgt_random = pd.DataFrame(df_wgt_random, columns=self.tickers)
+        df_ret_random = pd.Series(ret_random, name='Ret')
+        df_vol_random = pd.Series(vol_random, name='Vol')
+        df_sharpe_random = pd.Series(sharpe_random, name='Sharpe')
+        df_growth_random = pd.Series(df_wgt_random @ self.growth_wgt,
+                                     name='Growth')
+        df_illiq_random = pd.Series(df_wgt_random @ self.illiq_wgt,
+                                    name='Illiquidity')
+        df_fx_random = pd.Series(df_wgt_random @ self.fx_wgt, name='FX')
+
+        df_random = pd.concat([df_ret_random, df_vol_random,
+                               df_sharpe_random, df_growth_random,
+                               df_illiq_random, df_fx_random, df_wgt_random],
+                              axis=1)
+
+        return df_ef, df_random
