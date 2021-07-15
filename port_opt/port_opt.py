@@ -455,8 +455,8 @@ class SAAOpt(PortOpt):
     """
 
     def __init__(self, map_saa, cons_saa, options, option_map, tax_map,
-                 exp_ret, exp_cov, n_assets, tickers=None, long_short=False,
-                 bounds=(0, 1), **kwargs):
+                 exp_ret, exp_vol, exp_corr, n_assets, tickers=None,
+                 long_short=False, bounds=(0, 1), te_bmk=None, **kwargs):
         """
         :param map_saa: [pd.DataFrame]
                TABLE RESTRICTIONS:
@@ -490,13 +490,24 @@ class SAAOpt(PortOpt):
                3. rest of the columns:
                   ['CRS', 'PFr', 'Tc', 'PD', 'DTc', 'Def Tax', 'Ts', 'Tp', 'Ta']
         :param exp_ret [array] (N x 1)
-        :param exp_cov [array] (N x N)
+        :param exp_vol [array] (N x 1)
+        :param exp_corr [array] (N x N)
         :param n_assets: [int] number of assets, should be the same as the
                          index size of map_saa and con_saa.
         :param tickers: [list(str)] list of strings of asset names
         :param long_short: [boolean] market-neutral if True, weight sum to 0
         :param bounds: [np.array/tuple] np.array of asset weight bounds or a
                        single tuple that fits for all assets
+        :param te_bmk: [dict] the benchmark SAA used for calculating ex-ante
+                       tracking error constraint.
+               RESTRICTIONS:
+               1. keys = tracking error constraint name in cons_saa, e.g.,
+                         TE_PDS (tracking error relative to PDS SAA)
+               2. items = df_wgt_bmk [pd.DataFrame] (n_assets, n_options),
+                          e.g., PDS SAA weight
+                          Each option with a max TE_PDS in cons_saa must have a
+                          bmk weight column.
+               Note: Can have multiple tracking error constraint key-item pairs.
         """
         super().__init__(n_assets, tickers, long_short, bounds)
 
@@ -505,15 +516,20 @@ class SAAOpt(PortOpt):
         self.assets = [*self.map_saa.index]
         self.sectors = [*self.map_saa['Sector_PDS'].unique()]
         self.tax_map = tax_map
+        self.te_bmk = te_bmk
 
         # Feature Weights
         self.growth_wgt = self.map_saa.loc[:, 'Growth_PDS']
         self.fx_wgt = self.map_saa.loc[:, 'FX_PDS']
         self.illiq_wgt = self.map_saa.loc[:, 'Illiquidity_PDS']
 
-        # CMA assumptions
+        # CMA assumptions used for performance metrics calculation
         self.exp_ret = exp_ret
-        self.exp_cov = exp_cov
+        self.exp_vol = exp_vol
+        self.exp_ret_vol = np.vstack([self.exp_ret, self.exp_vol]).T
+        self.exp_corr = exp_corr
+        self.exp_cov = np.diag(self.exp_vol) @ self.exp_corr @ np.diag(
+            self.exp_vol)
 
         # Check whether options are all in the cons_saa columns:
         if isinstance(options, list):
@@ -535,6 +551,17 @@ class SAAOpt(PortOpt):
             raise Exception('option_map input has incorrect options list.')
         else:
             self.option_map = option_map
+
+        # Check tracking error constraints
+        self.te_constraints = [*self.cons_saa.loc[self.cons_saa.Con_Type ==
+                                                  'Option_TE'].index]
+        if len(self.te_constraints) > 0:
+            if self.te_bmk is None:
+                raise ValueError('Need to provide the benchmark weight for '
+                                 'tracking error constraint calculation.')
+            elif self.te_constraints != [*self.te_bmk.keys()]:
+                raise ValueError('The provided te_bmk keys should match the '
+                                 'tracking error constraints in cons_saa.')
 
         # Protected variables
         self._option = None
@@ -674,6 +701,18 @@ class SAAOpt(PortOpt):
                 else:
                     raise Exception(
                         'Unexpected constraint type {}.'.format(con_type_i))
+            elif con_type_i == 'Option_TE':
+                # Tracking error constraint
+                bmk_i = self.te_bmk[con_i].loc[:, self._option].values
+                if type_i == 'Max':
+                    x_max_i = self.cons_saa[self._option].iloc[i]
+                    self.add_constraint(
+                        'ineq', "lambda x: {} - (x-np.array({})).T @ "
+                                "np.frombuffer({}).reshape({}, {}) "
+                                "@ (x-np.array({}))".format(
+                            x_max_i ** 2, list(bmk_i), self.exp_cov.tostring(),
+                            self.n_assets, self.n_assets, list(bmk_i)))
+
             elif con_type_i == 'Sector_PDS':
                 # Get the location of sub-sectors that belong to the sector.
                 # E.g., for Australian Equities,
@@ -796,6 +835,12 @@ class SAAOpt(PortOpt):
                     else:
                         raise Exception(
                             'Unexpected constraint type {}.'.format(con_type_i))
+                elif con_type_i == 'Option_TE':
+                    # Tracking error constraint
+                    bmk_i = self.te_bmk[con_i].loc[:, a].values
+                    df_constraint_check_i.loc[con_i, 'Actual'] = \
+                        np.sqrt((df_wgt_i - bmk_i).T @ self.exp_cov @ (
+                                df_wgt_i - bmk_i))
                 elif con_type_i == 'Sector_PDS':
                     # Get the location of sub-sectors that belong to the sector.
                     # E.g., for Australian Equities,
@@ -877,14 +922,22 @@ class SAAOpt(PortOpt):
 
         return self.df_constraint_check
 
-    def options_opt_run(self, obj_str, args, print_res=False, after_tax=True,
-                        check_constraints=True, opt_perf_metrics=True, **kwargs):
+    def options_opt_run(self, obj_str, args, print_res=False,
+                        after_tax_opt=True, after_tax_output=True,
+                        check_constraints=True, opt_perf_metrics=True,
+                        **kwargs):
         """
         Loop through all the options in the self.options for optimization.
         Run the self.opt_run() method for each option and each objective
         function defined.
         Store the result to res_opt_options for all options and objective
         functions defined.
+
+        :param: after_tax_opt: [boolean] If true, convert args to after-tax
+                for optimization.
+        :param: after_tax_output: [boolean] If true, use the instance
+                self.exp_ret, self.exp_vol, self.exp_corr to calculate the
+                 after-tax performance metrics.
         
         :return: res_opt_options [dict] a nested dictionary stores all
                  options optimization results in the format: e.g.,
@@ -905,14 +958,20 @@ class SAAOpt(PortOpt):
                 self._bounds_option = self.bounds
 
             # Convert before-tax exp_ret into after-tax
-            if after_tax:
+            if after_tax_opt and obj_str == ['max_sharpe']:
+                # Currently only works for 'max_sharpe' otherwise the
+                # order of arguments is not correct
                 for k in args.keys():
                     # Construct a list since tuple cannot be changed
                     list_arg_k = list(args[k])
-                    list_arg_k[0] = pm.after_tax_exp_ret(
-                        self.tax_map, args[k][0],
+                    exp_ret_at_k, exp_vol_at_k = pm.after_tax_exp_ret_vol(
+                        self.tax_map, self.exp_ret_vol,
                         account=self.option_map.loc[self._option,
-                                                    'Account']).values
+                                                    'Account'])
+                    list_arg_k[0] = exp_ret_at_k
+                    exp_cov_at_k = np.diag(exp_vol_at_k) @ self.exp_corr @ \
+                                   np.diag(exp_vol_at_k)
+                    list_arg_k[1] = exp_cov_at_k
                     args[k] = tuple(list_arg_k)
 
             # Run optimization and Store results for each objective function
@@ -937,7 +996,7 @@ class SAAOpt(PortOpt):
         # Generate Regulatory Performance Metrics
         if opt_perf_metrics:
             # Results stored in self.df_perf_metrics
-            self.opt_perf_metrics(**kwargs)
+            self.opt_perf_metrics(after_tax=after_tax_output, **kwargs)
 
         return self.res_opt_options
 
@@ -972,7 +1031,8 @@ class SAAOpt(PortOpt):
             self._option_tax_account = self.option_map.loc[self._option,
                                                            'Account']
             perf_metrics_i = pm.OptionPerfMetrics(
-                self.df_wgt.loc[:, (a, b)], self.exp_ret, self.exp_cov,
+                self.df_wgt.loc[:, (a, b)], self.exp_ret, self.exp_vol,
+                self.exp_corr,
                 self._option_obj,
                 self._option_obj_horizon, self.map_saa.loc[:, 'Growth_PDS'],
                 self.map_saa.loc[:, 'FX_PDS'],
@@ -1108,13 +1168,13 @@ class SAAOpt(PortOpt):
             wgt_ef = []
             ret_ef = []
             vol_ef = []
-            for i in np.linspace(1, 200, 100):
+            for i in np.linspace(1, 1000, 1000):
                 args_i = (exp_ret, exp_cov, i)
                 self._objective = obj.call_obj_functions('max_quad_utility')
                 res_i = minimize(self._objective,
                                  x0=self._wgt0,
-                                 bounds=self.bounds, args=args_i,
-                                 method='SLSQP',
+                                 bounds=[(0, 1)] * self.n_assets,
+                                 args=args_i, method='SLSQP',
                                  constraints=
                                  {'type': 'eq', 'fun': lambda x: x.sum() - 1},
                                  options={'maxiter': 10000, 'disp': True})
