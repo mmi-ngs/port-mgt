@@ -51,7 +51,7 @@ exp_cov_ngs = np.diag(exp_ret_vol_ngs.iloc[:, 1]) @ hist_rho_fs\
                   @ np.diag(exp_ret_vol_ngs.iloc[:, 1])
 
 # Set optimization parameters
-sub_sectors = [*map_saa.index]
+assets = [*map_saa.index]
 options = [*cons_saa.columns[2:]]
 option_i = 'Diversified'
 
@@ -73,7 +73,7 @@ obj_list = ['max_sharpe']
 args_obj = {'max_sharpe': (exp_ret, exp_cov, 0.0025, True)}
 
 saa_opt = SAAOpt(map_saa, cons_saa, options, option_map, tax_map,
-                 exp_ret, exp_vol, exp_corr, n_assets=N, tickers=sub_sectors,
+                 exp_ret, exp_vol, exp_corr, n_assets=N, tickers=assets,
                  bounds=bounds, te_bmk={'TE_PDS': curr_saa})
 res_multi_options = saa_opt.options_opt_run(obj_list, args_obj,
                                             after_tax_opt=True,
